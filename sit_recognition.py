@@ -69,8 +69,8 @@ class SitRecognition():
                                 (base_x1+w+gap, 140), (base_x1+w+gap, 175),
                                 (base_x1+w*2+gap*2, 140), (base_x1+w*2+gap*2, 175)]
         
-        self.sits_simul_bus1_under = [(base_x1+w*2+gap*2, 35), (base_x1+w*3+gap*3, 140),
-                                     (base_x1+w*3+gap*3, 175), (base_x1+w*3+gap*3, 35)]
+        self.sits_simul_bus1_under = [(base_x1+w*2+gap*2 , 35), (base_x1+w*3+gap*3 , 140),
+                                     (base_x1+w*3+gap*3 , 175), (base_x1+w*3+gap*3 , 35)]
         
         self.sits_simul_bus1_out = [(base_x1+w*4+gap*4, 140), (base_x1+w*4+gap*4, 175),
                                    (base_x1+w*4+gap*4, 35)]
@@ -96,7 +96,8 @@ class SitRecognition():
             seat_status: dict[str, dict[str, bool]]
         """
         
-        print("seat_status: ", seat_status)
+        for key , value in seat_status.items():
+            print(f"{key} : {value}")
         result_img = self.brt_simul.copy()
         
         # 모든 좌석 좌표 리스트
@@ -141,10 +142,16 @@ class SitRecognition():
         }
         
         coordinates = []
-        if row in seat_mapping:
+        if row == 'side_seat':  
+            if positions.get('seat9'):
+                coordinates.append(self.sits_simul_bus1_under[0])
+            if positions.get('seat10'):
+                coordinates.append(self.sits_simul_bus1_under[3])
+        elif row in seat_mapping:  # 일반 좌석 처리
             for side in ['left', 'right']:
-                if side in positions and positions[side]:
+                if positions.get(side):
                     coordinates.append(seat_mapping[row][side])
+        
         return coordinates
 
 if __name__ == "__main__":
@@ -156,7 +163,8 @@ if __name__ == "__main__":
         'row1': {'left': True, 'right': False},
         'row2': {'left': True, 'right': False},
         'row3': {'left': True, 'right': False},
-        'row4': {'left': True, 'right': False}
+        'row4': {'left': True, 'right': False},
+        'side_seat': {'seat9': True, 'seat10': True}
     }
     
     # 시각화 실행

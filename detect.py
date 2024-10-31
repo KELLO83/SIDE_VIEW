@@ -17,6 +17,7 @@ from collections import Counter
 import multiprocessing as mp
 import traceback
 from sit_recognition import SitRecognition
+from typing import Dict, List, Tuple, Optional, Union
 
 logging.basicConfig(
     level=logging.INFO,
@@ -121,7 +122,7 @@ class YoloDetector:
                 logging.error("이미지 리스트가 비어있습니다.")
                 return
 
-            self.set_list = self.set_list[450:]
+            self.set_list = self.set_list[800:]
             
             for door_path, under_path in tqdm(self.set_list):
                 door = cv2.imread(door_path, cv2.IMREAD_COLOR)
@@ -137,20 +138,21 @@ class YoloDetector:
                 under_prediction, position_details = self.prediction(under_plane, flag='cam2')
                 door_prediction, door_row_counter = self.prediction(door_plane, flag='cam0')
                 
-                # 디버깅을 위한 출력
-                print("\nposition_details:", position_details)
-                print("door_row_counter:", door_row_counter)
- 
                 cam0_detections = door_row_counter.copy()
                 cam2_detections = position_details.copy()
-                for idx, (key, value) in enumerate(cam2_detections.items()):
-                    print(f"Row {idx+1}: {key} {value}")
-                    
-                print("\n=== cam0_detections 상태 ===")
-                print(cam0_detections)
+                print("position_details: ", position_details)
+                print("===cam2_detections===")
+                for key, value in cam2_detections.items():
+                    if key != 'side_seat':  # side_seat는 별도 처리
+                        print(f"Row {key}: {value}")
+                if 'side_seat' in cam2_detections:
+                    print(f"Side seats: {cam2_detections['side_seat']}")
 
+                # print("\n=== cam0_detections 상태 ===")
+                # print(cam0_detections)
+                print('cam2_detections: ', cam2_detections)
                 self.seat_detector.determine_seat_positions(cam0_detections, cam2_detections)
-                self.seat_detector.print_seat_status()
+                #self.seat_detector.print_seat_status()
                 
                 visualization = self.visualizer.visualize_seats(self.seat_detector.get_seat_status())
                 cv2.namedWindow("under", cv2.WINDOW_NORMAL)
@@ -308,16 +310,18 @@ class Location():
             center_x = (x1 + x2) // 2
             center_y = (y1 + y2) // 2
             
-            cv2.line(img, (0, Location.side_seat_limit_y), (w, Location.side_seat_limit_y), (0, 255, 255), 2)
-            cv2.line(img, (Location.side_seat_limit_x, 0), (Location.side_seat_limit_x, h-1), (200, 200, 200), 2)
-            cv2.line(img , (0 , 325), (w , 325), (0, 0 , 255), 2)
+            # cv2.line(img, (0, Location.side_seat_limit_y), (w, Location.side_seat_limit_y), (0, 255, 255), 2)
+            # cv2.line(img, (Location.side_seat_limit_x, 0), (Location.side_seat_limit_x, h-1), (200, 200, 200), 2)
+            # cv2.line(img , (0 , 325), (w , 325), (0, 0 , 255), 2)
             
             if Location.side_seat_limit_x <= x2 and y2 >= Location.side_seat_limit_y:
                 if y2 >= 325:
                     side_seats_occupied['side_seats']['seat9'] = True
+                    continue
                 else:
                     side_seats_occupied['side_seats']['seat10'] = True
-            
+                    continue
+                
             if not (center_x >= 300):
                 idx = min(range(len(Location.y_limit)), key=lambda i: abs(Location.y_limit[i] - y1))
                 memory.append(idx)
@@ -349,22 +353,22 @@ class Location():
                 position_details[idx] = {"LEFT": 0, "RIGHT": 0}
             position_details[idx][pos] += 1
 
-        print("\n=== 열별 좌우 위치 상세 ===")
-        for row in sorted(position_details.keys()):
-            left_count = position_details[row]["LEFT"]
-            right_count = position_details[row]["RIGHT"]
-            print(f"Row {row}: LEFT={left_count}, RIGHT={right_count}")
+        # print("\n=== 열별 좌우 위치 상세 ===")
+        # for row in sorted(position_details.keys()):
+        #     left_count = position_details[row]["LEFT"]
+        #     right_count = position_details[row]["RIGHT"]
+        #     print(f"Row {row}: LEFT={left_count}, RIGHT={right_count}")
 
         for key in row_counter.keys():
             loc = Location.y_limit[key]
             left_count = position_details.get(key, {"LEFT": 0})["LEFT"]
             right_count = position_details.get(key, {"RIGHT": 0})["RIGHT"]
             total_count = row_counter[key]
-            
             cv2.putText(img, f"L:{left_count} R:{right_count} (T:{total_count})", 
                        (100, loc + 30), cv2.FONT_HERSHEY_DUPLEX, 0.7, (0, 0, 255))
+            
         position_details = dict(sorted(position_details.items(), key=lambda x: x[0]))
-        position_details['side_seats'] = side_seats_occupied['side_seats']
+        position_details['side_seat'] = side_seats_occupied['side_seats']
         return img, position_details
     
     def cam0_run(self, img, boxes):
@@ -409,49 +413,50 @@ class Location():
     
 class SeatPositionDetector:
     def __init__(self):
-        self.seat_positions = {
-            'row1': {'left': False, 'right': False},
-            'row2': {'left': False, 'right': False},
-            'row3': {'left': False, 'right': False},
-            'row4': {'left': False, 'right': False},
-            'side_seats': {'seat9': False, 'seat10': False}
-        }
+        self.seat_positions = self._initialize_seats()
         
-    def determine_seat_positions(self, cam0_detections, cam2_detections):
-        """
-        cam0_detections: {4: 2, 3: 1, 2: 1, 1: 2} 형태의 딕셔너리
-        cam2_detections: {
-            1: {'LEFT': 1, 'RIGHT': 0},
-            2: {'LEFT': 1, 'RIGHT': 0},
-            3: {'LEFT': 1, 'RIGHT': 0},
-            4: {'LEFT': 1, 'RIGHT': 0},
-            'side_seats': {'seat9': 0, 'seat10': 0}
-        } 형태의 딕셔너리
-        """
-        # 4개의 행 처리
-        for row_idx in range(1, 5):
-            row_name = f'row{row_idx}'
-            cam2_info = cam2_detections.get(row_idx, {'LEFT': 0, 'RIGHT': 0})
-            
-            # 초기화 및 상태 설정
-            self.seat_positions[row_name]['left'] = self._check_position(cam2_info, 'LEFT')
-            self.seat_positions[row_name]['right'] = self._check_position(cam2_info, 'RIGHT')
-        
-        # 측면좌석 판별
-        side_seats = cam2_detections.get('side_seats', {'seat9': 0, 'seat10': 0})
-        self.seat_positions['side_seats']['seat9'] = bool(side_seats.get('seat9', 0))
-        self.seat_positions['side_seats']['seat10'] = bool(side_seats.get('seat10', 0))
+    def _initialize_seats(self):
+        # 모든 좌석을 False로 초기화
+        return {
+            f'row{i}': {'left': False, 'right': False}
+            for i in range(1, 5)
+        } | {'side_seat': {'seat9': False, 'seat10': False}}
 
-    def _check_position(self, detection_info, position):
-        """
-        특정 위치(LEFT/RIGHT)의 착석 여부 확인
+    def determine_seat_positions(self, cam0_detections, cam2_detections):
+        try:
+            # 모든 좌석을 False로 초기화
+            self.seat_positions = self._initialize_seats()
+            
+            # cam2_detections에 있는 데이터만 처리
+            for key, value in cam2_detections.items():
+                if key == 'side_seat':
+                    self._update_side_seats(value)
+                elif isinstance(key, int) and 1 <= key <= 4:
+                    row_name = f'row{key}'
+                    self._update_seat_position(row_name, value)
+                    
+            # 디버깅을 위한 출력
+            for i in range(1, 5):
+                row_name = f'row{i}'
+                print(f"{row_name} : {self.seat_positions[row_name]}")
+            print(f"side_seat : {self.seat_positions['side_seat']}")
+                    
+        except Exception as e:
+            logging.error(f"좌석 위치 결정 중 오류 발생: {e}")
+            raise
+
+    def _update_seat_position(self, row_name, detection_info):
+        # LEFT와 RIGHT 값을 명시적으로 가져와서 처리
+        left_occupied = detection_info.get('LEFT', 0) > 0
+        right_occupied = detection_info.get('RIGHT', 0) > 0
         
-        Args:
-            detection_info (dict): {'LEFT': count, 'RIGHT': count} 형태의 딕셔너리
-            position (str): 'LEFT' 또는 'RIGHT'
-        """
-        return detection_info.get(position, 0) > 0
-    
+        self.seat_positions[row_name]['left'] = left_occupied
+        self.seat_positions[row_name]['right'] = right_occupied
+
+    def _update_side_seats(self, side_seats):
+        self.seat_positions['side_seat']['seat9'] = bool(side_seats.get('seat9', False))
+        self.seat_positions['side_seat']['seat10'] = bool(side_seats.get('seat10', False))
+
     def get_seat_status(self):
         """
         현재 좌석 상태를 딕셔너리 형태로 반환
@@ -476,7 +481,7 @@ class SeatPositionDetector:
         
         # 측면 좌석 출력
         print("\n측면 좌석:")
-        side_seats = self.seat_positions['side_seats']
+        side_seats = self.seat_positions['side_seat']
         print(f"  9번 좌석: {'착석' if side_seats['seat9'] else '비어있음'}")
         print(f"  10번 좌석: {'착석' if side_seats['seat10'] else '비어있음'}")
 
