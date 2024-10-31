@@ -1,4 +1,4 @@
-\```plantuml
+```plantuml
 @startuml
 class YoloDetector {
     -model: YOLO
