@@ -51,7 +51,7 @@ class YoloDetector:
         self.score_map = np.zeros(shape=(640, 640 ), dtype=np.float32)
         #self.score_map = cv2.imread('new/mask_2000.jpg').astype(np.float32)
         #self.score = (255 / len(self.set_list)) * 10
-        self.score = 0.04
+        self.score = 0.02 * 1000
         print("픽셀 부여점수 : " , self.score)
         
     @property
@@ -63,56 +63,53 @@ class YoloDetector:
             under = cv2.imread(d , cv2.IMREAD_COLOR)
 
             door_plane = fisheye2plane.run(door , -40)
-            under_plane = fisheye2plane.run(under , -40)
+            #under_plane = fisheye2plane.run(under , -40)
  
-            under_prediction  = self.prediction(under_plane)
+            door_plane  = self.prediction(door_plane)
+
 
             if idx % 1000 == 0 and idx != 0 or idx == len(self.set_list) - 1:
-                # cv2.namedWindow("under" , cv2.WINDOW_NORMAL)
-                #cv2.namedWindow("mask" , cv2.WINDOW_NORMAL)
-                #cv2.imshow('under' , under_prediction)
-                #cv2.imshow('mask' , self.score_map.astype(np.uint8))
-                #cv2.waitKey(0)
-                #cv2.destroyAllWindows()
+                # cv2.namedWindow("door" , cv2.WINDOW_NORMAL)
+                # cv2.imshow('door' , door_plane)
+                # cv2.waitKey(0)
+                # cv2.destroyAllWindows()
                 
-                cv2.imwrite(os.path.join('0.04score',f'mask_{idx}.jpg') , self.score_map)
+                os.makedirs('door_results' , exist_ok=True)
+                cv2.imwrite(os.path.join('door_results',f'mask_{idx}.jpg') , self.score_map)
 
 
-    def prediction(self ,img: np.ndarray | torch.Tensor ) -> np.array:
-
-        result = self.model(img , classes = 0 ,verbose = False)
-
+    def prediction(self, img: np.ndarray | torch.Tensor) -> np.array:
+        result = self.model(img, classes=0, verbose=False)
+        
         boxes = []
         scores = []
         for res in result:
             for box in res.boxes:
                 if int(box.cls) == 0:
-                    x1 , y1 , w , h = box.xyxy[0].tolist()
+                    x1, y1, x2, y2 = box.xyxy[0].tolist()
                     score = box.conf
-                    boxes.append([int(x1), int(y1), int(w - x1), int(h - y1)])
+                    boxes.append([int(x1), int(y1), int(x2), int(y2)])
                     scores.append(float(score.detach().cpu().numpy()))
 
-        if not boxes:
-            for x,y in self.circle_array:
-                cv2.circle(img , (x , y) , 1 , (0,0,255),-1)
-                return img
-            
-        nmx_boxes = self.apply_nms(boxes , scores)
-        nmx_boxes = list(map(self.nmx_box_to_cv2_loc , boxes))
-        img_res = self.draw(nmx_boxes , img )
+        nmx_boxes = self.apply_nms(boxes, scores)
+        img_res = self.draw(nmx_boxes, img)
         return img_res
 
     def draw(self, nmx_boxes: list[list[int]], img: np.ndarray) -> np.ndarray:
-        h, w, _ = img.shape
-
-
         for idx, i in enumerate(nmx_boxes):
             x1, y1, x2, y2 = i
-            center_x, center_y = (x1 + x2) // 2, (y1 + y2) // 2
-            self.score_map[center_y][center_x] += self.score * 500
-        self.score_map = np.clip(self.score_map , 0 , 255)
+            center_x = min(max(0, (x1 + x2) // 2), 639)  # 범위 제한
+            center_y = min(max(0, (y1 + y2) // 2), 639)  # 범위 제한
             
-
+            # float32 타입으로 계산 후 클리핑
+            self.score_map[center_y, center_x] = np.clip(
+                self.score_map[center_y, center_x] + self.score,
+                0,
+                255
+            )
+        
+        # 최종 결과를 uint8로 변환
+        return self.score_map.astype(np.uint8)
 
     def pair(self , cam0_list , cam2_list ):
         buffer = []
@@ -141,22 +138,12 @@ class YoloDetector:
 
         return buffer
 
-    def nmx_box_to_cv2_loc(self, boxes):
-
-        x1, y1, w, h = boxes
-        x2 = x1 + w
-        y2 = y1 + h
-
-        return [x1, y1, x2, y2]
-
     def apply_nms(self, boxes, scores, iou_threshold=0.4):
-        indices = cv2.dnn.NMSBoxes(boxes, scores, 0.2, iou_threshold)
+        indices = cv2.dnn.NMSBoxes(boxes, scores, score_threshold=0.2, nms_threshold=iou_threshold)
         if isinstance(indices, list) and len(indices) > 0:
             return [boxes[i[0]] for i in indices]
-
         elif isinstance(indices, np.ndarray) and indices.size > 0:
             return [boxes[i] for i in indices.flatten()]
-
         else:
             return []
 

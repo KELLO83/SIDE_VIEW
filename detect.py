@@ -59,31 +59,52 @@ class YoloDetector:
         try:
             cam0_list = natsorted(glob(f'collect/scne{self.SCEN}_0.5origin/cam0/*.jpg'))
             cam2_list = natsorted(glob(f'collect/scne{self.SCEN}_0.5origin/cam2/*.jpg'))
-            return self.pair(cam0_list, cam2_list)
+            cam4_list = natsorted(glob(f'collect/scne{self.SCEN}_0.5origin/cam4/*.jpg'))
+            return self.pair(cam0_list, cam2_list, cam4_list , flag = False)
         
         except Exception as e:
             logging.error(f"이미지 로딩 실패: {e}")
             return []
 
-    def pair(self, cam0_list, cam2_list, flag=True):
+    def pair(self, cam0_list, cam2_list, cam4_list , flag=True):
         """이미지 경로 페어링 메서드"""
         buffer = []
-        cam0_dict = {os.path.basename(cam0_path): cam0_path for cam0_path in cam0_list}
+        # 딕셔너리 컴프리헨션에 에러 처리 추가
+        try:
+            cam0_dict = {os.path.basename(cam0_path): cam0_path for cam0_path in cam0_list}
+            cam2_dict = {os.path.basename(cam2_path): cam2_path for cam2_path in cam2_list}
+            cam4_dict = {os.path.basename(cam4_path): cam4_path for cam4_path in cam4_list}
 
-        for path in cam2_list:
-            name = os.path.basename(path)
+            for path in cam2_list:
+                name = os.path.basename(path)
+                cam0_path = None
+                cam4_path = None
 
-            if str(self.SCEN) in ['2', '3', '3x']:
-                index, _ = os.path.splitext(name)
-                cam0_path = cam0_dict.get(f"{str(int(index) + 10)}.jpg")
-            else:
-                cam0_path = cam0_dict.get(name)
+                try:
+                    if str(self.SCEN) in ['2', '3', '3x']:
+                        index, _ = os.path.splitext(name)
+                        adjusted_name = f"{str(int(index) + 10)}.jpg"
+                        cam0_path = cam0_dict.get(adjusted_name)
+                        cam4_path = cam4_dict.get(adjusted_name)
+                    else:
+                        cam0_path = cam0_dict.get(name)
+                        cam4_path = cam4_dict.get(name)
+                        
+                    if flag and cam0_path is not None and cam4_path is not None:
+                        buffer.append((cam0_path, path, cam4_path))
+                    
+                    elif flag == False and cam0_path is not None:
+                        buffer.append((cam0_path, path))
 
-            if flag:
-                if cam0_path is not None:
-                    buffer.append((cam0_path, path))
+                except ValueError as e:
+                    logging.warning(f"파일명 '{name}' 처리 중 오류 발생: {e}")
+                    continue
 
-        return buffer
+            return buffer
+
+        except Exception as e:
+            logging.error(f"페어링 처리 중 오류 발생: {e}")
+            return []
 
     def prediction(self, img: Union[np.ndarray, torch.Tensor], flag: str) -> np.ndarray:
         try:
@@ -122,7 +143,7 @@ class YoloDetector:
                 logging.error("이미지 리스트가 비어있습니다.")
                 return
 
-            self.set_list = self.set_list[800:]
+            self.set_list = self.set_list[0:]
             
             for door_path, under_path in tqdm(self.set_list):
                 door = cv2.imread(door_path, cv2.IMREAD_COLOR)
@@ -140,13 +161,13 @@ class YoloDetector:
                 
                 cam0_detections = door_row_counter.copy()
                 cam2_detections = position_details.copy()
-                print("position_details: ", position_details)
-                print("===cam2_detections===")
-                for key, value in cam2_detections.items():
-                    if key != 'side_seat':  # side_seat는 별도 처리
-                        print(f"Row {key}: {value}")
-                if 'side_seat' in cam2_detections:
-                    print(f"Side seats: {cam2_detections['side_seat']}")
+                # print("position_details: ", position_details)
+                # print("===cam2_detections===")
+                # for key, value in cam2_detections.items():
+                #     if key != 'side_seat':  # side_seat는 별도 처리
+                #         print(f"Row {key}: {value}")
+                # if 'side_seat' in cam2_detections:
+                #     print(f"Side seats: {cam2_detections['side_seat']}")
 
                 # print("\n=== cam0_detections 상태 ===")
                 # print(cam0_detections)
@@ -161,8 +182,11 @@ class YoloDetector:
                 cv2.imshow('door', door_prediction)
                 cv2.imshow('visualization', visualization)
                 
-                if cv2.waitKey(0) & 0xFF == ord('q'):
-                    break
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('c'):
+                    while True:
+                        if cv2.waitKey(0) & 0xFF == ord('c'):
+                            break
 
         except Exception as e:
             logging.error(f"실행 중 오류 발생: {str(e)}")
@@ -271,20 +295,23 @@ class Location():
     y_limit = [0, 60, 123, 211, 366, 532]
     cam0_x_limit = [0, 93, 253, 427, 599]
     
-    side_seat_limit_x , side_seat_limit_y = [ 565 , 200 ] 
+    side_seat_limit_x , side_seat_limit_y = [ 585 , 280 ] 
+    
+    side_box = [[454,228,639,329],[476,411,639,610]]
     
     def cam2_run(self, img, boxes):
         h, w, _ = img.shape
         
-        # for i in range(len(Location.right_points) - 1):
-        #     cv2.line(img, Location.right_points[i], Location.right_points[i + 1], (0, 255, 0), 2)
-        # for i in range(len(Location.left_points) - 1):
-        #     cv2.line(img, Location.left_points[i], Location.left_points[i + 1], (0, 255, 0), 2)      
-        # for i in Location.y_limit:
-        #     cv2.line(img, (0, i), (w, i - 1), (255, 0, 0), 2)
+        # Draw vertical line at x=585 in green
+        cv2.line(img, (self.side_seat_limit_x, 0), (self.side_seat_limit_x, h), (0, 0, 255), 2)
         
-        # cv2.line(img, (300, 0), (300, h - 1), (0, 0, 255), 2)
+        # Draw horizontal line at y=300 in yellow  
+        cv2.line(img, (0, self.side_seat_limit_y), (w, self.side_seat_limit_y), (0, 255, 255), 2)
+        cv2.line(img, (380, 0), (380, h), (0, 0, 255), 2)
         
+        for box in self.side_box:
+            cv2.rectangle(img, (box[0], box[1]), (box[2], box[3]), (255, 194, 205), 2)
+            
         def find_intersection_x(y, points):
             """주어진 y좌표에서 선분들과 만나는 x좌표 찾기"""
             for i in range(len(points) - 1):
@@ -310,16 +337,16 @@ class Location():
             center_x = (x1 + x2) // 2
             center_y = (y1 + y2) // 2
             
-            # cv2.line(img, (0, Location.side_seat_limit_y), (w, Location.side_seat_limit_y), (0, 255, 255), 2)
-            # cv2.line(img, (Location.side_seat_limit_x, 0), (Location.side_seat_limit_x, h-1), (200, 200, 200), 2)
-            # cv2.line(img , (0 , 325), (w , 325), (0, 0 , 255), 2)
-            
-            if Location.side_seat_limit_x <= x2 and y2 >= Location.side_seat_limit_y:
-                if y2 >= 325:
+            if Location.side_seat_limit_x <= x2 and y2 >= Location.side_seat_limit_y and x1 >= 380:
+                if y2 <= 325:
                     side_seats_occupied['side_seats']['seat9'] = True
+                    cv2.circle(img, (x2, y2), 3, (0, 0, 255), -1)
+                    cv2.putText(img, "9", (x2, y2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)  
                     continue
                 else:
                     side_seats_occupied['side_seats']['seat10'] = True
+                    cv2.circle(img, (x2, y2), 3, (0, 0, 255), -1)
+                    cv2.putText(img, "10", (x2, y2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)  
                     continue
                 
             if not (center_x >= 300):
@@ -344,8 +371,8 @@ class Location():
 
         row_counter = Counter(memory)
         row_counter = dict(sorted(row_counter.items(), key=lambda x: x[0]))
-        print("\n=== 열별 전체 인원 ===")
-        print("Row counts:", row_counter)
+        # print("\n=== 열별 전체 인원 ===")
+        # print("Row counts:", row_counter)
 
         position_details = {}
         for idx, pos in self.position_info:
@@ -424,16 +451,22 @@ class SeatPositionDetector:
 
     def determine_seat_positions(self, cam0_detections, cam2_detections):
         try:
-            # 모든 좌석을 False로 초기화
+            
             self.seat_positions = self._initialize_seats()
             
-            # cam2_detections에 있는 데이터만 처리
             for key, value in cam2_detections.items():
                 if key == 'side_seat':
                     self._update_side_seats(value)
-                elif isinstance(key, int) and 1 <= key <= 4:
+                    
+              
+                elif isinstance(key, int) and 1 <= key <= 4: # 1열 ~ 4열
                     row_name = f'row{key}'
                     self._update_seat_position(row_name, value)
+                    
+                elif isinstance(key , int) and  key == 0: # 0열은 추가적으로 1열으로 붙임
+                    row_name = f'row{key + 1}'
+                    self._update_seat_position(row_name, value)
+                                        
                     
             # 디버깅을 위한 출력
             for i in range(1, 5):

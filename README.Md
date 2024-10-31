@@ -1,4 +1,70 @@
+classDiagram
+    class YoloDetector {
+        -model: YOLO
+        -LOCATION: Location
+        -conf_threshold: float
+        -iou_threshold: float
+        -SCEN: str
+        -set_list: list
+        -seat_detector: SeatPositionDetector
+        -visualizer: SitRecognition
+        +__init__(SCEN: str)
+        +_load_and_pair_images()
+        +pair(cam0_list, cam2_list, cam4_list, flag: bool)
+        +prediction(img, flag: str)
+        +set_run()
+        +nmx_box_to_cv2_loc(boxes)
+        +apply_nms(boxes, scores, iou_threshold)
+        +draw(nmx_boxes, img, flag)
+    }
+
+    class Location {
+        +right_points: list
+        +left_points: list
+        +y_limit: list
+        +cam0_x_limit: list
+        +side_seat_limit_x: int
+        +side_seat_limit_y: int
+        +side_box: list
+        +cam2_run(img, boxes)
+        +cam0_run(img, boxes)
+        +get_position_info()
+    }
+
+    class SeatPositionDetector {
+        -seat_positions: dict
+        +__init__()
+        -_initialize_seats()
+        +determine_seat_positions(cam0_detections, cam2_detections)
+        -_update_seat_position(row_name, detection_info)
+        -_update_side_seats(side_seats)
+        +get_seat_status()
+        +print_seat_status()
+    }
+
+    class SitRecognition {
+        -sits_door1: list
+        -sits_bus1_under: list
+        -sits_bus1_out: list
+        -sits_door2: list
+        -sits_door3: list
+        -sits_bus2_in: list
+        -sits_bus2_out: list
+        +__init__()
+        -_init_seat_coordinates()
+        -_init_images()
+        -_init_simulation_coordinates() 
+        +visualize_seats(seat_status)
+        +get_seat_coordinates(row, positions)
+    }
+
+    YoloDetector --> Location
+    YoloDetector --> SeatPositionDetector
+    YoloDetector --> SitRecognition
+
+
 # 버스 좌석 탐지 시스템
+
 
 ## 프로젝트 개요
 
