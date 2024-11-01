@@ -74,8 +74,8 @@ class YoloDetector:
                 # cv2.waitKey(0)
                 # cv2.destroyAllWindows()
                 
-                os.makedirs('door_results' , exist_ok=True)
-                cv2.imwrite(os.path.join('door_results',f'mask_{idx}.jpg') , self.score_map)
+                os.makedirs('bottom' , exist_ok=True)
+                cv2.imwrite(os.path.join('bottom',f'mask_{idx}.jpg') , self.score_map)
 
 
     def prediction(self, img: np.ndarray | torch.Tensor) -> np.array:
@@ -98,12 +98,13 @@ class YoloDetector:
     def draw(self, nmx_boxes: list[list[int]], img: np.ndarray) -> np.ndarray:
         for idx, i in enumerate(nmx_boxes):
             x1, y1, x2, y2 = i
-            center_x = min(max(0, (x1 + x2) // 2), 639)  # 범위 제한
-            center_y = min(max(0, (y1 + y2) // 2), 639)  # 범위 제한
+            # 바운딩 박스의 하단 중앙점 계산
+            bottom_center_x = min(max(0, (x1 + x2) // 2), 639)  # x축 중앙점
+            bottom_y = min(max(0, y2), 639)  # 하단 y좌표 (바운딩 박스의 아래쪽)
             
             # float32 타입으로 계산 후 클리핑
-            self.score_map[center_y, center_x] = np.clip(
-                self.score_map[center_y, center_x] + self.score,
+            self.score_map[bottom_y, bottom_center_x] = np.clip(
+                self.score_map[bottom_y, bottom_center_x] + self.score,
                 0,
                 255
             )

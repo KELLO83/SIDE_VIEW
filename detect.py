@@ -44,7 +44,7 @@ def timing_decorator(func):
     return wrapper
 
 class YoloDetector:
-    def __init__(self, SCEN='1'):
+    def __init__(self, SCEN='2'):
         self.model = YOLO('yolo11x.pt')
         self.LOCATION = Location()
         self.conf_threshold = 0.25
@@ -53,7 +53,8 @@ class YoloDetector:
         self.set_list = self._load_and_pair_images()
         self.seat_detector = SeatPositionDetector()
         self.visualizer = SitRecognition()
-        
+    
+
     def _load_and_pair_images(self):
         """이미지 로딩 및 페어링"""
         try:
@@ -126,15 +127,16 @@ class YoloDetector:
             img_res = self.draw(nmx_boxes, img, flag)
             
             if flag == 'cam0':
-                img_res , row_counter = self.LOCATION.cam0_run(img_res, nmx_boxes)
+                img_res , row_counter , people_row_cordinate = self.LOCATION.cam0_run(img_res, nmx_boxes)
             elif flag == 'cam2':
-                img_res , row_counter = self.LOCATION.cam2_run(img_res, nmx_boxes)
+                img_res , row_counter , people_row_cordinate = self.LOCATION.cam2_run(img_res, nmx_boxes)
             
             
-            return img_res , row_counter
+            return img_res , row_counter, people_row_cordinate
         except Exception as e:
+            
             logging.error(f"예측 중 오류 발생: {e}")
-            return img , {}
+            raise e
 
     def set_run(self) -> None:
         """실행 메서드"""
@@ -143,7 +145,7 @@ class YoloDetector:
                 logging.error("이미지 리스트가 비어있습니다.")
                 return
 
-            self.set_list = self.set_list[0:]
+            self.set_list = self.set_list[400:]
             
             for door_path, under_path in tqdm(self.set_list):
                 door = cv2.imread(door_path, cv2.IMREAD_COLOR)
@@ -156,8 +158,8 @@ class YoloDetector:
                 door_plane = fisheye2plane.run(door, -40)
                 under_plane = fisheye2plane.run(under, -40)
                 
-                under_prediction, position_details = self.prediction(under_plane, flag='cam2')
-                door_prediction, door_row_counter = self.prediction(door_plane, flag='cam0')
+                under_prediction, position_details , people_row_cordinate = self.prediction(under_plane, flag='cam2')
+                door_prediction, door_row_counter , people_row_cordinate = self.prediction(door_plane, flag='cam0')
                 
                 cam0_detections = door_row_counter.copy()
                 cam2_detections = position_details.copy()
@@ -169,10 +171,11 @@ class YoloDetector:
                 # if 'side_seat' in cam2_detections:
                 #     print(f"Side seats: {cam2_detections['side_seat']}")
 
-                # print("\n=== cam0_detections 상태 ===")
-                # print(cam0_detections)
+                print("\n=== cam0_detections 상태 ===")
+                print(cam0_detections)
                 print('cam2_detections: ', cam2_detections)
-                self.seat_detector.determine_seat_positions(cam0_detections, cam2_detections)
+                self.seat_detector.determine_seat_positions_cam2(cam2_detections)
+                self.seat_detector.camera_calibration( cam0_detections , people_row_cordinate )
                 #self.seat_detector.print_seat_status()
                 
                 visualization = self.visualizer.visualize_seats(self.seat_detector.get_seat_status())
@@ -182,7 +185,7 @@ class YoloDetector:
                 cv2.imshow('door', door_prediction)
                 cv2.imshow('visualization', visualization)
                 
-                key = cv2.waitKey(1) & 0xFF
+                key = cv2.waitKey(0) & 0xFF
                 if key == ord('c'):
                     while True:
                         if cv2.waitKey(0) & 0xFF == ord('c'):
@@ -294,11 +297,11 @@ class Location():
     
     y_limit = [0, 60, 123, 211, 366, 532]
     cam0_x_limit = [0, 93, 253, 427, 599]
-    
-    side_seat_limit_x , side_seat_limit_y = [ 585 , 280 ] 
-    
-    side_box = [[454,228,639,329],[476,411,639,610]]
-    
+    cam0_y_limit = [350 , 125 , 440] # uppper lower  발바닥 하한선
+        
+    side_seat_limit_x , side_seat_limit_y = [ 585 , 280  ] 
+    side_seat_threshold_x = 415  # 좌석 9 10 노이즈제거 x1 기준 사용
+
     def cam2_run(self, img, boxes):
         h, w, _ = img.shape
         
@@ -307,13 +310,11 @@ class Location():
         
         # Draw horizontal line at y=300 in yellow  
         cv2.line(img, (0, self.side_seat_limit_y), (w, self.side_seat_limit_y), (0, 255, 255), 2)
-        cv2.line(img, (380, 0), (380, h), (0, 0, 255), 2)
+        cv2.line(img, (self.side_seat_threshold_x, 0), (self.side_seat_threshold_x, h), (0, 0, 255), 2)
         
-        for box in self.side_box:
-            cv2.rectangle(img, (box[0], box[1]), (box[2], box[3]), (255, 194, 205), 2)
-            
+
         def find_intersection_x(y, points):
-            """주어진 y좌표에서 선분들과 만나는 x좌표 찾기"""
+            """주어진 y좌표에서 선분들과 만나는 x좌표 ��기"""
             for i in range(len(points) - 1):
                 p1 = points[i]
                 p2 = points[i + 1]
@@ -337,19 +338,19 @@ class Location():
             center_x = (x1 + x2) // 2
             center_y = (y1 + y2) // 2
             
-            if Location.side_seat_limit_x <= x2 and y2 >= Location.side_seat_limit_y and x1 >= 380:
+            if Location.side_seat_limit_x <= x2 and y2 >= Location.side_seat_limit_y and x1 >= Location.side_seat_threshold_x:
                 if y2 <= 325:
                     side_seats_occupied['side_seats']['seat9'] = True
-                    cv2.circle(img, (x2, y2), 3, (0, 0, 255), -1)
-                    cv2.putText(img, "9", (x2, y2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)  
+                    cv2.circle(img, (x2, y2), 5, (51, 51, 255), -1)
+                    cv2.putText(img, "9", (x2-40, y2), cv2.FONT_HERSHEY_DUPLEX, 2, (0, 0, 255), 1)  
                     continue
                 else:
                     side_seats_occupied['side_seats']['seat10'] = True
-                    cv2.circle(img, (x2, y2), 3, (0, 0, 255), -1)
-                    cv2.putText(img, "10", (x2, y2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)  
+                    cv2.circle(img, (x2, y2), 5, (51, 51, 255), -1)
+                    cv2.putText(img, "10", (x2-40, y2), cv2.FONT_HERSHEY_DUPLEX, 2, (0, 0, 255), 1)  
                     continue
                 
-            if not (center_x >= 300):
+            if  ( not center_x >= 300 and not y2 >= 570): # 570 cam2에서 마지막행 제외 
                 idx = min(range(len(Location.y_limit)), key=lambda i: abs(Location.y_limit[i] - y1))
                 memory.append(idx)
                 
@@ -391,48 +392,67 @@ class Location():
             left_count = position_details.get(key, {"LEFT": 0})["LEFT"]
             right_count = position_details.get(key, {"RIGHT": 0})["RIGHT"]
             total_count = row_counter[key]
-            cv2.putText(img, f"L:{left_count} R:{right_count} (T:{total_count})", 
+            cv2.putText(img, f"Row{key}:L:{left_count} R:{right_count} (T:{total_count})", 
                        (100, loc + 30), cv2.FONT_HERSHEY_DUPLEX, 0.7, (0, 0, 255))
             
         position_details = dict(sorted(position_details.items(), key=lambda x: x[0]))
         position_details['side_seat'] = side_seats_occupied['side_seats']
-        return img, position_details
+        return img, position_details , []
     
     def cam0_run(self, img, boxes):
         h, w, _ = img.shape
         # 수직선 그리기
         for i in Location.cam0_x_limit:
             cv2.line(img, (i, 0), (i, h - 1), (255, 0, 0), 2)
-        
+            
+        for i in Location.cam0_y_limit:
+            cv2.line(img, (0, i), (w - 1, i), (0, 0, 255), 2)     
+            
+        people_row_cordinate = {f'row{i}': [] for i in range(len(Location.cam0_x_limit) - 1)}
         people_where = []
+        
         # 각 사람의 위치 확인
-        for x1, _, _, _ in boxes:
-            for idx in range(len(Location.cam0_x_limit) - 1):
-                lower_limit = Location.cam0_x_limit[idx]
-                upper_limit = Location.cam0_x_limit[idx + 1]
+        for x1, y1, x2, y2 in boxes:
+            center_x = (x1 + x2) // 2
+            center_y = (y1 + y2) // 2
+            if center_y <= Location.cam0_y_limit[0] and y1 >= Location.cam0_y_limit[1] and y2 <= Location.cam0_y_limit[2]:
+                cv2.rectangle(img, (x1, y1), (x2, y2), (199, 180, 200), 2)
+                for idx in range(len(Location.cam0_x_limit) - 1):
+                    lower_limit = Location.cam0_x_limit[idx]
+                    upper_limit = Location.cam0_x_limit[idx + 1]
 
-                if lower_limit <= x1 <= upper_limit:
-                    if abs(lower_limit - x1) <= abs(upper_limit - x1):
-                        people_where.append(idx)
-                    else:
-                        people_where.append(idx + 1)
-                    break  
+                    if lower_limit <= x1 <= upper_limit:
+                        if abs(lower_limit - x1) <= abs(upper_limit - x1):
+                            people_where.append(idx)
+                            people_row_cordinate[f'row{idx}'].append([center_x, center_y])
+                        else:
+                            people_where.append(idx + 1)
+                            people_row_cordinate[f'row{idx + 1}'].append([center_x, center_y])
+                        break  
 
         # 각 열의 인원 수 계산
         row_counter = Counter(people_where)
-        row_counter = {4 - key: value for key, value in sorted(row_counter.items())}
-        # print("\n=== 열별 전체 인원 ===")
-        # print("Row counts:", row_counter)
+        
+        # 빈 row_counter인 경우에도 1-4 키를 모두 포함하도록 초기화
+        default_counter = {i: 0 for i in range(1, 5)}
+        if row_counter:
+            row_counter = {4 - key: value for key, value in row_counter.items()}
+        else:
+            row_counter = default_counter
+
+        print("row_counter")
+        print(row_counter)
         
         # 각 열에 인원 수 표시
         for key, value in row_counter.items():
-            loc = Location.cam0_x_limit[4 - key]
+            loc = Location.cam0_x_limit[key - 1]
             cv2.putText(img, f"T:{value}", 
                        (loc + 30, 30), 
                        cv2.FONT_HERSHEY_DUPLEX, 
                        0.7, (0, 0, 255))
-            
-        return img , row_counter
+
+        row_counter = dict(sorted(row_counter.items(), key=lambda x: x[0]))
+        return img, row_counter, people_row_cordinate
     
     def get_position_info(self):
         """position_info 반환"""
@@ -449,7 +469,7 @@ class SeatPositionDetector:
             for i in range(1, 5)
         } | {'side_seat': {'seat9': False, 'seat10': False}}
 
-    def determine_seat_positions(self, cam0_detections, cam2_detections):
+    def determine_seat_positions_cam2(self, cam2_detections):
         try:
             
             self.seat_positions = self._initialize_seats()
@@ -477,7 +497,83 @@ class SeatPositionDetector:
         except Exception as e:
             logging.error(f"좌석 위치 결정 중 오류 발생: {e}")
             raise
-
+        
+    def camera_calibration(self, cam0_detections, people_row_cordinate):
+        """
+        카메라 캘리브레이션 처리
+        cam 0 와 cam 2 의 좌석 위치 정보를 통해 카메라 캘리브레이션 처리
+        cam 0 형태 : {0: 1, 1: 1, 2: 1, 3: 1 , 4: 1}
+        cam 2 형태 : {0: {'LEFT': 1, 'RIGHT': 0}, 1: {'LEFT': 1, 'RIGHT': 0}, 2: {'LEFT': 1, 'RIGHT': 0}, 3: {'LEFT': 1, 'RIGHT': 0}}
+        people_row_cordinate : {f'row{i}': [[center_x, center_y], [center_x, center_y]]}
+        """
+        # key를 row key로 변환
+        row_detections = {}
+        for key in cam0_detections:
+            row_key = f'row{key}'
+            row_detections[row_key] = cam0_detections[key]
+                    
+        for i in range(1,5): # 카메라 cam0 cam2를 이용한 좌석 판단 작성.
+            row_name = f'row{str(i)}'
+            cam0_row_count = row_detections.get(row_name, 0) # 해당행의 사람명수 
+            cam2_row_count_left = self.seat_positions[row_name].get('left', 0)
+            cam2_row_count_right = self.seat_positions[row_name].get('right', 0)
+            
+            if cam0_row_count == 0 and cam2_row_count_left + cam2_row_count_right == 0:
+                # 정상 케이스: 해당 열에 아무도 없음
+                self.seat_positions[row_name]['left'] = 0
+                self.seat_positions[row_name]['right'] = 0
+                
+            elif cam0_row_count == 0 and (cam2_row_count_left + cam2_row_count_right > 0):
+                # cam2에서만 감지된 경우 - cam2 결과 사용
+                self.seat_positions[row_name]['left'] = cam2_row_count_left 
+                self.seat_positions[row_name]['right'] = cam2_row_count_right
+                
+            elif cam0_row_count == 1 and cam2_row_count_left + cam2_row_count_right == 0:
+                # cam0에서만 감지된 경우 (사각지대) - 좌우 판단 불가로 pass 그러나 row3번은 손잡이로인해 cam0이 하나 cam2가 0일떄 좌로가정
+                if row_name == 'row3':
+                    self.seat_positions[row_name]['right'] = 0
+                    self.seat_positions[row_name]['left'] = 1
+                else: # cam0  떔빵용 
+                    _  , cy = people_row_cordinate[row_name][0]
+                    if cy >= 270:
+                        self.seat_positions[row_name]['right'] = 1
+                    else:
+                        self.seat_positions[row_name]['left'] = 1
+                        
+            elif cam0_row_count == 1 and cam2_row_count_left + cam2_row_count_right == 1:
+                # 정상 케이스: 한 명이 정확히 감지됨
+                self.seat_positions[row_name]['left'] = cam2_row_count_left
+                self.seat_positions[row_name]['right'] = cam2_row_count_right
+                
+            elif cam0_row_count == 1 and cam2_row_count_left + cam2_row_count_right == 2:
+                # cam2에서 2명 감지 - 좌우 모두 착석으로 처리
+                self.seat_positions[row_name]['left'] = 1
+                self.seat_positions[row_name]['right'] = 1
+                
+            elif cam0_row_count == 2 and cam2_row_count_left + cam2_row_count_right == 0:
+                # cam0에서 2명 감지 - 좌우 모두 착석으로 처리
+                self.seat_positions[row_name]['left'] = 1
+                self.seat_positions[row_name]['right'] = 1
+                
+            elif cam0_row_count == 2 and cam2_row_count_left + cam2_row_count_right == 1:
+                # cam0에서 2명 감지 - 좌우 모두 착석으로 처리
+                self.seat_positions[row_name]['left'] = 1
+                self.seat_positions[row_name]['right'] = 1
+                
+            elif cam0_row_count == 2 and cam2_row_count_left + cam2_row_count_right == 2:
+                # 양쪽 카메라에서 모두 2명 감지 - 좌우 모두 착석으로 처리
+                self.seat_positions[row_name]['left'] = 1
+                self.seat_positions[row_name]['right'] = 1
+                
+        print("row_detections")
+        print(row_detections)
+        print("self.seat_positions")
+        print(self.seat_positions)    
+        
+        cam0_detections.clear()
+        cam0_detections.update(row_detections)
+        
+    
     def _update_seat_position(self, row_name, detection_info):
         # LEFT와 RIGHT 값을 명시적으로 가져와서 처리
         left_occupied = detection_info.get('LEFT', 0) > 0
