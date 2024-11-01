@@ -1,29 +1,30 @@
-import socket
-import requests
-import base64
+import cv2
+import mediapipe as mp
 
-# UDP 서버 설정
-UDP_IP = "127.0.0.1"  # 로컬 IP
-UDP_PORT = 5000       # UDP 포트
+# MediaPipe 솔루션 초기화
+mp_pose = mp.solutions.pose
+pose = mp_pose.Pose(static_image_mode=True, min_detection_confidence=0.1, min_tracking_confidence=0.1 , model_complexity=2)
 
-# HTTP 서버 설정 (ngrok을 통해 생성된 URL을 사용)
-HTTP_URL = "https://dd8b-211-210-158-226.ngrok-free.app"
+mp_drawing = mp.solutions.drawing_utils
 
-# UDP 소켓 생성 및 수신 대기
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.bind((UDP_IP, UDP_PORT))
+# 웹캠 캡처 시작
 
-print(f"Listening for UDP packets on {UDP_IP}:{UDP_PORT}...")
+image = cv2.imread('under_plane/under_513.jpg')
 
-# while True:
-#     # UDP 데이터 수신
-#     data, addr = sock.recvfrom(1024)  # 1024는 버퍼 사이즈
-#     print(f"Received message: {data} from {addr}")
+image = cv2.cvtColor(image  , cv2.COLOR_BGR2RGB)
 
-#     # 데이터를 Base64로 인코딩하여 HTTP POST로 전송
-#     encoded_data = base64.b64encode(data).decode('utf-8')  # Base64 인코딩
-#     response = requests.post(HTTP_URL, json={"udp_data": encoded_data})
-#     print(f"HTTP Response: {response.status_code}, {response.text}")
+# 포즈 추정 수행
+results = pose.process(image)
 
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-sock.sendto(b"Test message", ("127.0.0.1", 5000))
+# RGB 이미지를 다시 BGR로 변환 (OpenCV에서 사용하기 위함)
+image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+
+# 포즈 랜드마크를 그리기
+if results.pose_landmarks:
+    mp_drawing.draw_landmarks(
+        image, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
+
+# 화면에 출력
+cv2.imshow('MediaPipe Pose', image)
+cv2.waitKey(0)
+cv2.destroyAllWindows()
