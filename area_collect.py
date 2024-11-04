@@ -57,43 +57,48 @@ class YoloDetector:
     @property
     @timing_decorator
     def set_run(self):
-        # self.set_list = self.set_list[ 2000  : ]
+        self.set_list = self.set_list[ 2000  : ]
         for idx , (f ,d ) in tqdm(enumerate(self.set_list) , total=len(self.set_list)):
             door = cv2.imread(f , cv2.IMREAD_COLOR)
             under = cv2.imread(d , cv2.IMREAD_COLOR)
 
-            door_plane = fisheye2plane.run(door , -40)
+            #door_plane = fisheye2plane.run(door , -40)
             #under_plane = fisheye2plane.run(under , -40)
  
-            door_plane  = self.prediction(door_plane)
-
-
-            if idx % 1000 == 0 and idx != 0 or idx == len(self.set_list) - 1:
+            under_plane , image_plot = self.prediction(under)
+            cv2.namedWindow("image_plot" , cv2.WINDOW_NORMAL)
+            cv2.imshow("image_plot" , image_plot)
+            cv2.waitKey(0)
+            
+            
+            # if idx % 1000 == 0 and idx != 0 or idx == len(self.set_list) - 1:
                 # cv2.namedWindow("door" , cv2.WINDOW_NORMAL)
                 # cv2.imshow('door' , door_plane)
                 # cv2.waitKey(0)
                 # cv2.destroyAllWindows()
                 
-                os.makedirs('bottom' , exist_ok=True)
-                cv2.imwrite(os.path.join('bottom',f'mask_{idx}.jpg') , self.score_map)
+                # os.makedirs('bottom' , exist_ok=True)
+                # cv2.imwrite(os.path.join('bottom',f'mask_{idx}.jpg') , self.score_map)
 
 
     def prediction(self, img: np.ndarray | torch.Tensor) -> np.array:
-        result = self.model(img, classes=0, verbose=False)
-        
+        result = self.model(img, classes=[0], verbose=False , device='cuda' , half=False , augment=True , iou=0.4 , conf=0.4 , imgsz=640)
+        result = result[0]
+        if hasattr(result , 'plot'):
+            image_plot = result.plot()
         boxes = []
         scores = []
-        for res in result:
-            for box in res.boxes:
-                if int(box.cls) == 0:
-                    x1, y1, x2, y2 = box.xyxy[0].tolist()
-                    score = box.conf
-                    boxes.append([int(x1), int(y1), int(x2), int(y2)])
-                    scores.append(float(score.detach().cpu().numpy()))
+      
+        for box in result.boxes:
+            if int(box.cls) == 0:
+                x1, y1, x2, y2 = box.xyxy[0].tolist()
+                score = box.conf
+                boxes.append([int(x1), int(y1), int(x2), int(y2)])
+                scores.append(float(score.detach().cpu().numpy()))
 
         nmx_boxes = self.apply_nms(boxes, scores)
         img_res = self.draw(nmx_boxes, img)
-        return img_res
+        return img_res , image_plot
 
     def draw(self, nmx_boxes: list[list[int]], img: np.ndarray) -> np.ndarray:
         for idx, i in enumerate(nmx_boxes):
@@ -149,6 +154,7 @@ class YoloDetector:
             return []
 
 if __name__ == "__main__":
+    from natsort import natsorted
     cam0_list = []
     cam2_list = []
     for root , dir , files in os.walk('collect'):
@@ -160,6 +166,7 @@ if __name__ == "__main__":
             for file in files:
                 if file.endswith("jpg"):
                     cam0_list.append(os.path.join(root , file))
-
+    cam0_list = natsorted(cam0_list)
+    cam2_list = natsorted(cam2_list)
     C = YoloDetector(cam0_list=cam0_list , cam2_list=cam2_list)
     C.set_run

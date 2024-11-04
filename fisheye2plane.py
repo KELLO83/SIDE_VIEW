@@ -64,8 +64,7 @@ def fisheye_to_plane_info(frame, ih, iw, i_fov=180, o_fov=90, o_sz=600, o_u=0, o
     out = np.fliplr(transformed_image)
 
     return out
-
-def run(frame , view , flag = True):
+def run(frame, view, move=0, flag=True):
     """_summary_
 
     Args:
@@ -84,7 +83,7 @@ def run(frame , view , flag = True):
 
     h, w, _ = list(map(int, frame_new.shape))
     
-    res = np.array(fisheye_to_plane_info(frame_new , h , w , 180 , 90 , 640 , view , 0))
+    res = np.array(fisheye_to_plane_info(frame_new , h , w , 180 , 90 , 640 , view , move))
     if flag:
         res = cv2.rotate(res , cv2.ROTATE_90_COUNTERCLOCKWISE)
     else:
