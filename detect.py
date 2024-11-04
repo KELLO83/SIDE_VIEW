@@ -19,6 +19,8 @@ import traceback
 from sit_recognition import SitRecognition
 from typing import Dict, List, Tuple, Optional, Union
 from collections import deque
+import math
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(message)s',
@@ -44,7 +46,7 @@ def timing_decorator(func):
     return wrapper
 
 class YoloDetector:
-    def __init__(self, SCEN='2'):
+    def __init__(self, SCEN='1'):
         self.model = YOLO('yolo11x.pt')
         self.LOCATION = Location()
         self.conf_threshold = 0.25
@@ -74,7 +76,7 @@ class YoloDetector:
             return []
 
     def pair(self, cam0_list, cam2_list, cam4_list , flag=True):
-        """이미지 경로 페어링 메서드"""
+        """이미�� 경로 페어링 메서드"""
         buffer = []
         # 딕셔너리 컴프리헨션에 에러 처리 추가
         try:
@@ -181,12 +183,16 @@ class YoloDetector:
                 self.seat_detector.camera_calibration(cam0_detections, detected_person_cordinate)
                 
 
-                visualization = self.visualizer.visualize_seats(self.seat_detector.get_seat_status())
+                #visualization = self.visualizer.visualize_seats(self.seat_detector.get_seat_status())
                 cv2.namedWindow("under", cv2.WINDOW_NORMAL)
                 cv2.namedWindow('door', cv2.WINDOW_NORMAL)
                 cv2.imshow('under', under_prediction)
                 cv2.imshow('door', door_prediction)
-                cv2.imshow('visualization', visualization)
+                #cv2.imshow('visualization', visualization)
+                
+                #tracking_image = self.tracking.tracking(under_plane.copy())
+                #cv2.namedWindow('tracking', cv2.WINDOW_NORMAL)
+                #cv2.imshow('tracking', tracking_image)
                 
                 pose_estimation = self.pose_estimator.PoseEstimation(under_plane.copy())
                 cv2.namedWindow('pose_estimation', cv2.WINDOW_NORMAL)
@@ -226,7 +232,7 @@ class YoloDetector:
         if len(boxes) == 0:
             return [], []
             
-        # NMS 적용
+        # NMS 용
         indices = cv2.dnn.NMSBoxes(boxes.tolist(), scores.tolist(), 
                                  self.conf_threshold, iou_threshold)
         
@@ -320,7 +326,7 @@ class Location():
         
 
         def find_intersection_x(y, points):
-            """주어진 y좌표에서 선분들과 만나는 x좌표 기"""
+            """주어진 y좌표에서 선분들과 나는 x좌표 기"""
             for i in range(len(points) - 1):
                 p1 = points[i]
                 p2 = points[i + 1]
@@ -577,7 +583,7 @@ class SeatPositionDetector:
                 self.seat_positions[row_name]['right'] = cam2_row_count_right
                 
             elif cam0_row_count == 1 and cam2_row_count_left + cam2_row_count_right == 2:
-                # cam2에서 2명 감지 - 좌우 모�� 착석으로 처리
+                # cam2에서 2명 감지 - 좌우 모 착석으로 처리
                 self.seat_positions[row_name]['left'] = 1
                 self.seat_positions[row_name]['right'] = 1
                 
@@ -628,7 +634,7 @@ class SeatPositionDetector:
     
     def print_seat_status(self):
         """
-        모든 좌석의 상태를 포맷팅하여 출력
+        모든 좌석의 태를 포맷팅하여 출력
         """
         print("\n=== 좌석 상태 ===")
         # 일반 좌석 출력
@@ -650,99 +656,256 @@ class YoloPoseEstimator:
         self.pose_estimator = YOLO('yolo11x-pose.pt')
         # 하체 키포인트 인덱스 정의
         self.lower_body_keypoints = {
-            # 0: 'nose',          # 코
-            # 1: 'neck',          # 목
-            # 5: 'left_shoulder', # 왼쪽 어깨
-            # 6: 'right_shoulder',# 오른쪽 어깨
+            0: 'nose',          # 코
+            1: 'neck',          # 목
+            5: 'left_shoulder', # 왼쪽 어깨
+            6: 'right_shoulder',# 오른쪽 어깨
             11: 'left_hip',     # 왼쪽 엉덩이
             12: 'right_hip',    # 오른쪽 엉덩이
             13: 'left_knee',    # 왼쪽 무릎
             14: 'right_knee',   # 오른쪽 무릎
         }
         
-    def PoseEstimation(self, img):
+        self.KEYPOINT_INDEX = {v: k for k, v in self.lower_body_keypoints.items()}
+        
+        # 연결선 정의를 클래스 속성으로 이동
+        self.connections = [
+            (11, 13),  # 왼쪽 엉덩이-왼쪽 무릎
+            (12, 14),  # 오른쪽 엉덩이-오른쪽 무릎
+            (11, 12),  # 왼쪽 엉덩이-오른쪽 엉덩이
+        ]
+        
+        # 상수 정의
+        self.CONFIDENCE_THRESHOLD = 0.3
+        self.LINE_COLOR = (0, 255, 0)    # 초록색
+        self.POINT_COLOR = (255, 0, 0)   # 파란색
+        self.TEXT_COLOR = (0, 0, 255)    # 빨간색
+        
+    def is_valid_keypoints(self, keypoints, indices):
+        """주어진 키포인트들이 모두 신뢰도 임계값을 넘는지 확인"""
+        return all(keypoints[idx][2] > self.CONFIDENCE_THRESHOLD for idx in indices)
+        
+    def calculate_midpoint(self, keypoints, idx1, idx2):
+        """두 키포인트의 중점 계산"""
+        if self.is_valid_keypoints(keypoints, [idx1, idx2]):
+            return (keypoints[idx1][:2] + keypoints[idx2][:2]) / 2
+        return None
+    
+    def calculate_direction_angle(self, person_keypoints):
         """
-        사람 감지 후 하체 키포인트만 표시
-        Args:
-            img (np.ndarray): 입력 이미지
-
+        'LEFT HIP' 'RIGHT HIP' 'LEFT KNEE' 'RIGHT KNEE' 를 이용하여 사람이 바라보고 있는 방향 각도를 계산합니다.
         Returns:
-            np.ndarray: 하체 키포인트가 표시된 이미지
+            float: 수학적 각도 (-180 ~ 180도)
         """
-        results = self.pose_estimator(img,
-                                    half=False,
-                                    iou=0.5,
-                                    conf=0.1,
-                                    device='cuda:0',
-                                    classes=[0])
-        
+        import math
 
-        output_img = img.copy()
-        
 
-        for result in results:
-            if hasattr(result, 'keypoints') and result.keypoints is not None:
-                keypoints = result.keypoints.data
+        # 키포인트 추출
+        left_hip = person_keypoints[self.KEYPOINT_INDEX.get('left_hip')]
+        right_hip = person_keypoints[self.KEYPOINT_INDEX.get('right_hip')]
+        left_knee = person_keypoints[self.KEYPOINT_INDEX.get('left_knee')]
+        right_knee = person_keypoints[self.KEYPOINT_INDEX.get('right_knee')]
+
+        # 신뢰도 체크
+        if (left_hip[2] > self.CONFIDENCE_THRESHOLD and right_hip[2] > self.CONFIDENCE_THRESHOLD and
+            left_knee[2] > self.CONFIDENCE_THRESHOLD and right_knee[2] > self.CONFIDENCE_THRESHOLD):
+
+            # 엉덩이 중점 계산
+            hip_midpoint = [
+                (left_hip[0] + right_hip[0]) / 2,
+                (left_hip[1] + right_hip[1]) / 2
+            ]
+
+            # 무릎 중점 계산
+            knee_midpoint = [
+                (left_knee[0] + right_knee[0]) / 2,
+                (left_knee[1] + right_knee[1]) / 2
+            ]
+
+            # 방향 벡터 계산 (엉덩이에서 무릎으로 향하는 벡터)
+            dx = knee_midpoint[0] - hip_midpoint[0]
+            dy = knee_midpoint[1] - hip_midpoint[1]
+
+            # 각도 계산 (수평선 기준, 오른쪽이 0도)
+            angle = math.degrees(math.atan2(dy, dx))
+            
+            # 각도를 -180 ~ 180 범위로 조정
+            angle = angle % 360
+            if angle > 180:
+                angle -= 360
                 
-                for person_keypoints in keypoints:
-                    connections = [
-                        # (0, 1),  # 코-목
-                        # (1, 5),  # 목-왼쪽어깨
-                        # (1, 6),  # 목-오른쪽어깨
-                        (11, 13), # 왼쪽 엉덩이-왼쪽 무릎
-                        (12, 14), # 오른쪽 엉덩이-오른쪽 무릎
-                        (11, 12), # 왼쪽 엉덩이-오른쪽 엉덩이
-                    ]
-                    
-                    for start_idx, end_idx in connections:
-                        start_point = person_keypoints[start_idx]
-                        end_point = person_keypoints[end_idx]
-                        
+            return angle
+        
+        else:
+            # 키포인트 신뢰도가 낮을 경우 None 반환
+            return None
+        
+    def draw_skeleton(self, img, person_keypoints):
+        """신뢰도가 높은 키포인트 간의 스켈레톤만 그리기"""
+        for start_idx, end_idx in self.connections:
+            if self.is_valid_keypoints(person_keypoints, [start_idx, end_idx]):
+                start_pos = tuple(map(int, person_keypoints[start_idx][:2]))
+                end_pos = tuple(map(int, person_keypoints[end_idx][:2]))
+                cv2.line(img, start_pos, end_pos, self.LINE_COLOR, 2)
 
-                        if (start_point[2] > 0.5 and end_point[2] > 0.5):
-                            start_pos = (int(start_point[0]), int(start_point[1]))
-                            end_pos = (int(end_point[0]), int(end_point[1]))
-                            cv2.line(output_img, start_pos, end_pos, (0, 255, 0), 2)
-                    
-     
-                    for idx in self.lower_body_keypoints.keys():
-                        kp = person_keypoints[idx]
-                        if kp[2] > 0.5:  
-                            x, y = int(kp[0]), int(kp[1])
-                            cv2.circle(output_img, (x, y), 4, (255, 0, 0), -1)
-                            cv2.putText(output_img, 
-                                      self.lower_body_keypoints[idx], 
-                                      (x + 5, y), 
-                                      cv2.FONT_HERSHEY_SIMPLEX, 
-                                      0.5, 
-                                      (0, 0, 255), 
-                                      1)
+    def draw_keypoints(self, img, person_keypoints):
+        """키포인트 circle 표시 """
+        for idx, label in self.lower_body_keypoints.items():
+            kp = person_keypoints[idx]
+            if kp[2] > self.CONFIDENCE_THRESHOLD:
+                x, y = map(int, kp[:2])
+                cv2.circle(img, (x, y), 4, self.POINT_COLOR, -1)
+                cv2.putText(img, label, (x + 5, y), 
+                          cv2.FONT_HERSHEY_SIMPLEX, 0.5, 
+                          self.TEXT_COLOR, 1)
+                
+    def calculate_head_direction_angle(self, person_keypoints):
+        """ 머리 방향 각도 계산 """
+        nose = person_keypoints[0]
+        neck = person_keypoints[1]
+        if nose[2] > self.CONFIDENCE_THRESHOLD and neck[2] > self.CONFIDENCE_THRESHOLD:
+            head_vector = neck - nose
+            head_angle = math.degrees(math.atan2(head_vector[1], head_vector[0]))
+        else:
+            head_angle = None
+        
+        return head_angle
+    
+    def calculate_upper_body_direction(self, person_keypoints):
+        """ 상체 방향 각도 계산 """
+        left_shoulder = person_keypoints[5]
+        right_shoulder = person_keypoints[6]
+        if left_shoulder[2] > self.CONFIDENCE_THRESHOLD and right_shoulder[2] > self.CONFIDENCE_THRESHOLD:
+            upper_body_vector = right_shoulder - left_shoulder
+            upper_body_angle = math.degrees(math.atan2(upper_body_vector[1], upper_body_vector[0]))
+        else:
+            upper_body_angle = None
+        
+        return upper_body_angle
+    
+    def draw_angle_arrow(self, img, start_point, angle, length=50, color=(0, 0, 255), thickness=2):
+        """
+        각도를 나타내는 화살표를 그립니다.
+        Args:
+            angle: -180 ~ 180 범위의 각도
+        """
+        # 각도를 라디안으로 변환
+        angle_rad = math.radians(angle)
+        
+        # 끝점 계산 (y축이 아래로 증가하므로 sin에 -를 곱함)
+        end_x = int(start_point[0] + length * math.cos(angle_rad))
+        end_y = int(start_point[1] + length * math.sin(angle_rad))
+        end_point = (end_x, end_y)
+        
+        # 화살표 그리기
+        cv2.arrowedLine(img, start_point, end_point, color, thickness, tipLength=0.3)
+        
+        return img
+    
+    def PoseEstimation(self, img):
+        try:
+            results = self.pose_estimator(img,
+                                        half=False,
+                                        iou=0.5,
+                                        conf=0.1,
+                                        device='cuda:0',
+                                        classes=[0])
+            
+            output_img = img.copy()
 
-        return output_img
+            for result in results:
+                if not hasattr(result, 'keypoints') or result.keypoints is None:
+                    continue
+                    
+                keypoints = result.keypoints.data
+                xyxys = result.boxes.xyxy.data
+                for person_keypoints, xyxy in zip(keypoints, xyxys):
+                    x1, y1, x2, y2 = list(map(int, xyxy.cpu().numpy()))
+                    center_x, center_y = int((x1+x2)//2), int((y1+y2)//2)
+                    cv2.rectangle(output_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    
+                    # 각도 계산
+                    head_angle = self.calculate_head_direction_angle(person_keypoints)
+                    upper_body_angle = self.calculate_upper_body_direction(person_keypoints)
+
+                    # y 좌표 오프셋 초기화
+                    y_offset = y1 - 20
+                    
+                    # 각 각도가 유효할 때만 텍스트 표시
+                    if head_angle is not None:
+                        cv2.putText(output_img,
+                                  f'Head Angle: {int(head_angle)}',
+                                  (x1, y_offset),
+                                  cv2.FONT_HERSHEY_SIMPLEX,
+                                  0.5,
+                                  (0,0,255),
+                                  2)
+                        y_offset -= 20
+                    
+                    if upper_body_angle is not None:
+                        cv2.putText(output_img,
+                                  f'Upper Body: {int(upper_body_angle)}',
+                                  (x1, y_offset),
+                                  cv2.FONT_HERSHEY_SIMPLEX,
+                                  0.5,
+                                  (0,0,255),
+                                  2)
+                        y_offset -= 20
+                    
+
+                        angle = self.calculate_direction_angle(person_keypoints)
+                        if angle is not None:
+                            # 텍스트 표시
+                            cv2.putText(output_img,
+                                  f'Lower Body: {int(angle)}',
+                                  (x1, y_offset),
+                                  cv2.FONT_HERSHEY_SIMPLEX,
+                                  0.5,
+                                  (0,0,255),
+                                  2)
+                            
+                            # hip_point 계산을 numpy 배열에서 실제 좌표로 변환
+                           
+                            
+                            left_hip = person_keypoints[self.KEYPOINT_INDEX.get('left_hip')]
+                            right_hip = person_keypoints[self.KEYPOINT_INDEX.get('right_hip')]
+                            
+                            left_hip_point = (int(left_hip[0]), int(left_hip[1]))
+                            right_hip_point = (int(right_hip[0]), int(right_hip[1]))
+                 
+                            cv2.circle(output_img, left_hip_point, 5, (200, 150 , 150), -1)  # hip_point 위치를 파란 점으로 표시
+                            cv2.circle(output_img, right_hip_point, 5, (200, 150 , 150), -1)  # hip_point 위치를 파란 점으로 표시
+                            # 화살표 그리기
+                            output_img = self.draw_angle_arrow(output_img, left_hip_point, angle)
+                    #self.draw_skeleton(output_img, person_keypoints)
+                    self.draw_keypoints(output_img, person_keypoints)
+            return output_img
+            
+        except Exception as e:
+            logging.error(f"Pose estimation error: {str(e)}")
+            return img
 
 class YoloTracking:
     def __init__(self):
         self.tracking_model = YOLO('yolo11x.pt')
         self.dynamic_status = {}
+        self.prev_frame_ids = set()  # 이전 프레임의 객체 ID 저장
         
     def tracking(self, img):
-        zero_image = np.zeros_like(img, dtype=np.uint8)
-        zero_image[:, 300:, :] = img[:, 300:, :]
-        cv2.namedWindow('tracking', cv2.WINDOW_NORMAL)
-        cv2.imshow('tracking', zero_image)
-        cv2.waitKey(0)
-        cv2.destroyAllWindows()
+        # zero_image = np.zeros_like(img, dtype=np.uint8)
+        # zero_image[:, 300:, :] = img[:, 300:, :]
+
         print("===============================tracking================================")
         results = self.tracking_model.track(
             img,
-            persist=True , 
-            classes=[0] , 
-            half=False , 
-            device='cuda:0' , 
-            iou=0.5 , 
-            conf=0.1 ,
+            persist=True,  # tracking 지속성 유지
+            classes=[0],
+            half=False,
+            device='cuda:0',
+            iou=0.4,
+            conf=0.1,
             imgsz=640,
-            augment = True,
+            augment=True,
             visualize=True,
         )
         results = results[0]
@@ -751,35 +914,73 @@ class YoloTracking:
             image_plot = results.plot()
             
         movement_status = {}  # 객체별 동적/정적 상태
+        current_frame_ids = set()  # 현재 프레임의 객체 ID 저장
 
         for obj in results.boxes:
-            obj_id = obj.id  # 객체의 고유 ID
-            x_center, y_center = obj.xywh[0].cpu().numpy()[:2]  # 중심 좌표 가져오기
-
+            if obj.id is None:  # ID가 없는 경우 건너뛰기
+                continue
+                
+            obj_id = int(obj.id)  # 객체의 고유 ID를 정수로 변환
+            current_frame_ids.add(obj_id)  # 현재 프레임 ID 기록
+            
+            x1 , y1 , x2 , y2 = obj.xyxy[0].cpu().numpy()
+            x_center = int((x1 + x2) / 2)
+            y_center = int((y1 + y2) / 2)
             # 해당 객체 ID의 좌표 리스트가 없으면 deque로 초기화 (최대 5개 유지)
             if obj_id not in self.dynamic_status:
                 self.dynamic_status[obj_id] = deque(maxlen=5)
 
             # 새 좌표를 deque에 추가
-            self.dynamic_status[obj_id].append((x_center, y_center))
+            self.dynamic_status[obj_id].append((x_center, y1))
 
+
+
+            max_distance = 0
+            avg_distance = 0
             # 최근 5개 좌표 변화 분석
-            if len(self.dynamic_status[obj_id]) == 5:
-                # 첫 좌표와 마지막 좌표 간의 거리 계산 (유클리드 거리)
-                first_x, first_y = self.dynamic_status[obj_id][0]
-                last_x, last_y = self.dynamic_status[obj_id][-1]
-                distance = ((last_x - first_x)**2 + (last_y - first_y)**2) ** 0.5
-
-                # 임계값(예: 10 픽셀)으로 이동 여부 판별
-                if distance > 20:
-                    movement_status[obj_id] = "동적(이동 중)"
+            if len(self.dynamic_status[obj_id]) >= 5:
+                max_distance = 0
+                avg_distance = 0
+                coordinates = list(self.dynamic_status[obj_id])
+                
+                for i in range(len(coordinates)):
+                    for j in range(i+1, len(coordinates)):
+                        distance = ((coordinates[i][0] - coordinates[j][0])**2 + 
+                                  (coordinates[i][1] - coordinates[j][1])**2) ** 0.5
+                        if distance > max_distance:
+                            max_distance = distance
                 else:
-                    movement_status[obj_id] = "정적(착석 상태)"
+                    avg_distance = max_distance / len(coordinates)
+                    
+                if avg_distance > 1:
+                    movement_status[obj_id] = ("MOVING", avg_distance)
+                    cv2.putText(image_plot, "MOVING", (x_center, y_center), 
+                              cv2.FONT_HERSHEY_DUPLEX, 1, (0, 0, 255), 2)
+                else:
+                    movement_status[obj_id] = ("STATIC",  avg_distance)
+                    cv2.putText(image_plot, "STATIC", (x_center, y_center), 
+                              cv2.FONT_HERSHEY_DUPLEX, 1, (0, 255, 0), 2)
             else:
-                # 5개 좌표가 채워지기 전까지는 판단 보류
-                movement_status[obj_id] = "판단 중"
+                movement_status[obj_id] = ("PENDING", avg_distance)
+                cv2.putText(image_plot, "PENDING", (x_center, y_center), 
+                          cv2.FONT_HERSHEY_DUPLEX, 1, (0, 255, 255), 2)
 
-        return movement_status
+        # 현재 프레임에 없는 객체의 기록 삭제
+        disappeared_ids = self.prev_frame_ids - current_frame_ids
+        for disappeared_id in disappeared_ids:
+            if disappeared_id in self.dynamic_status:
+                del self.dynamic_status[disappeared_id]
+
+        # 현재 프레임 ID를 이전 프레임 ID로 업데이트
+        self.prev_frame_ids = current_frame_ids
+        
+        print("\n=== Movement Status ===")
+        for obj_id in movement_status:
+            status, distance = movement_status[obj_id]
+            print(f"ID {obj_id:2d}: {status:8s} (distance: {distance:.2f})")
+
+        return image_plot
+
 class YoloSegmentation:
     colors = [
             (51, 255, 255),  # 노란색 (Yellow)
