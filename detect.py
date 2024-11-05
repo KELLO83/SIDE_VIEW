@@ -20,7 +20,7 @@ from sit_recognition import SitRecognition
 from typing import Dict, List, Tuple, Optional, Union
 from collections import deque
 import math
-
+import random
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(message)s',
@@ -133,7 +133,6 @@ class YoloDetector:
             nmx_boxes = list(map(self.nmx_box_to_cv2_loc, filtered_boxes))
             
             img_res = self.draw(nmx_boxes, img, flag)
-            
             if flag == 'cam0':
                 img_res , row_counter , detected_person_cordinate = self.LOCATION.cam0_run(img_res, nmx_boxes)
             elif flag == 'cam2':
@@ -159,7 +158,7 @@ class YoloDetector:
                 logging.error("이미지 리스트가 비어있습니다.")
                 return
 
-            self.set_list = self.set_list[400:]
+            self.set_list = self.set_list[750:]
 
             
             for door_path, under_path in tqdm(self.set_list):
@@ -172,10 +171,10 @@ class YoloDetector:
 
                 door_plane = fisheye2plane.run(door, -40)
                 under_plane = fisheye2plane.run(under, -40)
-                under2_plane = fisheye2plane.run(under, 40 ,move = 5 , flag=False)
-                cv2.namedWindow('under2', cv2.WINDOW_NORMAL)
-                test_image = self.test_run(under2_plane)
-                cv2.imshow('under2', test_image)
+                # under2_plane = fisheye2plane.run(under, 40 ,move = 5 , flag=False)
+                # cv2.namedWindow('under2', cv2.WINDOW_NORMAL)
+                # test_image = self.test_run(under2_plane)
+                # cv2.imshow('under2', test_image)
                 # os.makedirs('under_plane', exist_ok=True)
                 # cv2.imwrite(f'under_plane/under_{os.path.basename(under_path)}', under_plane)
                 #tracking_image = self.tracking.tracking(under_plane.copy())
@@ -446,7 +445,7 @@ class Location():
         h, w, _ = img.shape
         img = draw_guide_lines(img, h, w)
         
-        # 결과 저장을 위한 자료구조 초기화
+        
         detected_person_coordinates = {f'row{i}': [] for i in range(1, 5)}
         detected_row_numbers = []
 
@@ -919,7 +918,6 @@ class YoloPoseEstimator:
         else:
             return None
         
-
     def judge_pose_by_angles(self, person_keypoints):
         LEFT_HIP = 11
         LEFT_KNEE = 13
@@ -959,7 +957,7 @@ class YoloPoseEstimator:
         """
         각도를 나타내는 화살표를 그립니다.
         Args:
-            angle: -180 ~ 180 범위의 각도
+            angle: -180 ~ 180 위의 각도
         """
         if angle is None:
             return img
@@ -997,6 +995,11 @@ class YoloPoseEstimator:
             for result in results:
                 if not hasattr(result, 'keypoints') or result.keypoints is None:
                     continue
+                if hasattr(result, 'boxes'):
+                    boxes = result.boxes.data
+                    for box in boxes:
+                        x1, y1, x2, y2 = list(map(lambda x : int(x.cpu().numpy()) , box[:4]))
+                        cv2.rectangle(output_img, (x1, y1), (x2, y2), (0, 165, 255), 5)
                     
                 keypoints = result.keypoints.data
                 xyxys = result.boxes.xyxy.data
@@ -1077,18 +1080,75 @@ class YoloTracking:
         self.prev_frame_ids = set()  # 이전 프레임의 객체 ID 저장
         self.CONFIDENCE_AVG_THRESHOLD = 1
         
+        self.in_points =[
+        (299, 0),    # 시작점
+        (299, 30),
+        (299, 60),   # row1
+        (299, 90),
+        (299, 123),  # row2
+        (297, 150),
+        (295, 180),
+        (293, 211),  # row3
+        (292, 240),
+        (291, 270),
+        (291, 300),
+        (290, 330),
+        (290, 366),  # row4
+        (289, 400),
+        (288, 450),
+        (287, 500),
+        (287, 532),  # row5
+        (288, 570),
+        (289, 600),
+        (290, 639)   # 끝점
+    ]
+        self.out_points = [
+            (639, 290),  # idx 0
+            (396, 232), (406, 282), (412, 308), (417, 330), 
+            (423, 358), (430, 382), (436, 413), (444, 447), 
+            (451, 475), (458, 499), (462, 521), (467, 538), 
+            (470, 557), (477, 569), (481, 590), (485, 606), 
+            (489, 620), (494, 638)
+        ]
+
+        # idx 1부터 끝까지 x좌표에 30 더하기 -> 기존은 복도라인에 맞췄는데 조정작업 진행함 조금더 의자쪽으로 조정진행
+        for i in range(1, len(self.out_points)):
+            x, y = self.out_points[i]
+            self.out_points[i] = (x + 30, y)
+
         self.image_idx = 0
         self.save_dir = 'tracking_images'
         os.makedirs(self.save_dir, exist_ok=True)
+    
+    def __create_track_line(self , img): 
+        """
+        추적선 마스크 생성
+        """
+        h, w = img.shape[:2]
+        mask = np.zeros(shape=(h,w,3), dtype=np.uint8)
+
+        polygon_points = (
+            [(639, 0)] +  
+            self.in_points +  
+            self.out_points[::-1] + 
+            [(639, 0)]  
+        )
         
+        points = np.array(polygon_points, dtype=np.int32)
+        cv2.fillPoly(mask, [points], (0,0,255))
+        return mask
+    
     def tracking(self, img):
         zero_image = np.zeros_like(img, dtype=np.uint8)
         zero_image[ : , 300:, :] = img[:, 300:, :]
         model_input_image = zero_image.copy()
+        if not hasattr(self, 'track_line'):
+            self.track_line = self.__create_track_line(img)
+            
         print("===============================tracking================================")
         results = self.tracking_model.track(
-            model_input_image,
-            persist=True,  # tracking 지속성 유지
+            img.copy(),
+            persist=True,
             classes=[0],
             half=False,
             device='cuda:0',
@@ -1102,7 +1162,8 @@ class YoloTracking:
 
         if hasattr(results, 'show'):
             image_plot = results.plot()
-        image_plot[ : , : 300 , :] = img[ : , : 300 , :]
+            image_plot = cv2.addWeighted(image_plot, 0.8, self.track_line, 0.2, 0)
+
         movement_status = {}  # 객체별 동적/정적 상태
         current_frame_ids = set()  # 현재 프레임의 객체 ID 저장
 
@@ -1114,9 +1175,30 @@ class YoloTracking:
             current_frame_ids.add(obj_id)  # 현재 프레임 ID 기록
             
             x1 , y1 , x2 , y2 = list(map(int, obj.xyxy[0].cpu().numpy()))
-            #crop_img = img[y1:y2, x1:x2]
-            #cv2.imwrite(os.path.join(self.save_dir, f'{self.image_idx:06d}_{obj_id:02d}.jpg'), crop_img)
-            self.image_idx += 1
+            # 객체별 색상 매핑을 위한 딕셔너리 초기화
+            if not hasattr(self, 'obj_colors'):
+                self.obj_colors = {}
+            if not hasattr(self, 'center_points'):
+                self.center_points = {}
+                
+            # 새로운 객체 ID에 대해 랜덤 색상 할당
+            if obj_id not in self.obj_colors:
+                self.obj_colors[obj_id] = (
+                    random.randint(0,255), 
+                    random.randint(0,255),
+                    random.randint(0,255)
+                )
+            
+            if obj_id not in self.center_points:
+                self.center_points[obj_id] = []
+            self.center_points[obj_id].append(((x1 + x2)//2, y2))
+            
+            # 각 객체별로 고유한 색상으로 점들을 그림
+            for id, points in self.center_points.items():
+                color = self.obj_colors[id]
+                for point in points:
+                    cv2.circle(image_plot, point, 5, color, -1)
+                
             x_center = int((x1 + x2) / 2)
             y_center = int((y1 + y2) / 2)
             # 해당 객체 ID의 좌표 리스트가 없으면 deque로 초기화 (최대 5개 유지)
@@ -1124,42 +1206,35 @@ class YoloTracking:
                 self.dynamic_status[obj_id] = deque(maxlen=5)
 
             # 새 좌표를 deque에 추가
-            self.dynamic_status[obj_id].append((x2, y1))
-            cv2.circle(image_plot, (x2, y1), 5, (0, 165, 255), -1)
+            self.dynamic_status[obj_id].append(((x1+x2)//2, y2))
+            #cv2.circle(image_plot, (x2, y1), 5, (0, 165, 255), -1)
 
-
-            max_distance = 0
-            avg_distance = 0
             # 최근 5개 좌표 변화 분석
             if len(self.dynamic_status[obj_id]) >= 5:
-                max_distance = 0
-                avg_distance = 0
-                coordinates = list(self.dynamic_status[obj_id])
+                coordinates = list(self.dynamic_status[obj_id])[-5:]  # 최근 5개 좌표
+                points_in_mask = 0
                 
-                for i in range(len(coordinates)):
-                    for j in range(i+1, len(coordinates)):
-                        distance = ((coordinates[i][0] - coordinates[j][0])**2 + 
-                                  (coordinates[i][1] - coordinates[j][1])**2) ** 0.5
-                        if distance > max_distance:
-                            max_distance = distance
-                else:
-                    avg_distance = max_distance / len(coordinates)
-                    
-                if avg_distance > self.CONFIDENCE_AVG_THRESHOLD:
-                    movement_status[obj_id] = ("MOVING", avg_distance)
+                # 마스크 영역 내 좌표 개수 확인
+                for coord in coordinates:
+                    x, y = map(int, coord)
+                    if self.track_line[y, x].any():  # 마스크 영역 체크
+                        points_in_mask += 1
+                
+                if points_in_mask >= 3:  # 3개 이상이 마스크 영역 내에 있으면
+                    movement_status[obj_id] = ("MOVING", points_in_mask)
                     cv2.putText(image_plot, "MOVING", (x_center, y_center), 
-                              cv2.FONT_HERSHEY_DUPLEX, 1, (0, 0, 255), 2)
+                             cv2.FONT_HERSHEY_DUPLEX, 1, (0, 0, 255), 2)
                 else:
-                    movement_status[obj_id] = ("STATIC",  avg_distance)
+                    movement_status[obj_id] = ("STATIC", points_in_mask)
                     cv2.putText(image_plot, "STATIC", (x_center, y_center), 
-                              cv2.FONT_HERSHEY_DUPLEX, 1, (0, 255, 0), 2)
+                             cv2.FONT_HERSHEY_DUPLEX, 1, (0, 255, 0), 2)
                 
-                cv2.putText(image_plot, f"{avg_distance:.2f}", (x1, y1 + 20), 
-                              cv2.FONT_HERSHEY_DUPLEX, 1, (0, 255, 255), 2)
+                cv2.putText(image_plot, f"{points_in_mask}", (x1, y1 + 20), 
+                         cv2.FONT_HERSHEY_DUPLEX, 1, (0, 255, 255), 2)
             else:
-                movement_status[obj_id] = ("PENDING", avg_distance)
+                movement_status[obj_id] = ("PENDING", 0)
                 cv2.putText(image_plot, "PENDING", (x_center, y_center), 
-                          cv2.FONT_HERSHEY_DUPLEX, 1, (0, 255, 255), 2)
+                         cv2.FONT_HERSHEY_DUPLEX, 1, (0, 255, 255), 2)
 
         # 현재 프레임에 없는 객체의 기록 관리
         disappeared_ids = self.prev_frame_ids - current_frame_ids
