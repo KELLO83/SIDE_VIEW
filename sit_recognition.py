@@ -93,13 +93,35 @@ class SitRecognition():
     def visualize_seats(self, seat_status: dict[str, dict[str, bool]]) -> cv2.Mat:
         """좌석 상태 시각화
         args:
-            seat_status: dict[str, dict[str, bool]]
+            seat_status: {
+                1: {'LEFT': 0, 'RIGHT': 0},
+                2: {'LEFT': 0, 'RIGHT': 0},
+                3: {'LEFT': 0, 'RIGHT': 0},
+                4: {'LEFT': 0, 'RIGHT': 0},
+                'side_seat': {'seat9': 0, 'seat10': 0}
+            }
+            or 
+            {
+                'row1': {'LEFT': 0, 'RIGHT': 0},
+                'row2': {'LEFT': 0, 'RIGHT': 0},
+                'row3': {'LEFT': 0, 'RIGHT': 0},
+                'row4': {'LEFT': 0, 'RIGHT': 0},
+                'side_seat': {'seat9': 0, 'seat10': 0}
+            }
         """
         
-        for key , value in seat_status.items():
-            print(f"{key} : {value}")
+        new_seat_status = {}
         result_img = self.brt_simul.copy()
+        for key , value in seat_status.items(): # int형일떄 조정작업
+            if isinstance(key , int):
+                new_key = f"row{key}"
+                new_seat_status[new_key] = value
+            else:
+                new_seat_status[key] = value
+        seat_status = new_seat_status.copy()
         
+        print("DEBUG: ", seat_status)    
+                
         # 모든 좌석 좌표 리스트
         all_seats = {
             'door1': self.sits_simul_door1,
@@ -110,6 +132,7 @@ class SitRecognition():
             'bus2_in': self.sits_simul_bus2_in,
             'bus2_out': self.sits_simul_bus2_out
         }
+        
         
         # 각 좌석 위치에 이미지 오버레이 
         for section_name, coordinates in all_seats.items():
@@ -135,12 +158,12 @@ class SitRecognition():
     def get_seat_coordinates(self, row: str, positions: dict) -> list:
         """특정 row의 좌석 좌표 반환"""
         seat_mapping = {
-            'row1': {'left': self.sits_simul_door1[1], 'right': self.sits_simul_door1[0]},
-            'row2': {'left': self.sits_simul_door1[3], 'right': self.sits_simul_door1[2]}, 
-            'row3': {'left': self.sits_simul_door1[5], 'right': self.sits_simul_door1[4]},
-            'row4': {'left': self.sits_simul_bus1_under[2], 'right': self.sits_simul_bus1_under[1]}
+            'row1': {'LEFT': self.sits_simul_door1[1], 'RIGHT': self.sits_simul_door1[0]},
+            'row2': {'LEFT': self.sits_simul_door1[3], 'RIGHT': self.sits_simul_door1[2]}, 
+            'row3': {'LEFT': self.sits_simul_door1[5], 'RIGHT': self.sits_simul_door1[4]},
+            'row4': {'LEFT': self.sits_simul_bus1_under[2], 'RIGHT': self.sits_simul_bus1_under[1]}
         }
-        
+
         coordinates = []
         if row == 'side_seat':  
             if positions.get('seat9'):
@@ -148,8 +171,8 @@ class SitRecognition():
             if positions.get('seat10'):
                 coordinates.append(self.sits_simul_bus1_under[3])
         elif row in seat_mapping:  # 일반 좌석 처리
-            for side in ['left', 'right']:
-                if positions.get(side):
+            for side in ['LEFT', 'RIGHT']:
+                if positions.get(side) or positions.get(side.lower()):
                     coordinates.append(seat_mapping[row][side])
         
         return coordinates
