@@ -135,11 +135,13 @@ class YoloDetector:
             filtered_boxes, filtered_scores = self.apply_nms(boxes, scores)
             nmx_boxes = list(map(self.nmx_box_to_cv2_loc, filtered_boxes))
             
-            img_res = self.draw(nmx_boxes, img, flag , filtering)
+            img_res  = self.draw_boxes(nmx_boxes, img.copy())
+            img_res , filtering_boxes = self.filter_and_draw_boxes(nmx_boxes, img_res.copy(), filtering)
+            
             if flag == 'cam0':
-                img_res , row_counter , detected_person_cordinate = self.LOCATION.cam0_run(img_res, nmx_boxes )
+                img_res , row_counter , detected_person_cordinate = self.LOCATION.cam0_run(img_res, nmx_boxes , filtering_boxes)
             elif flag == 'cam2':
-                img_res , row_counter , detected_person_cordinate = self.LOCATION.cam2_run(img_res, nmx_boxes )
+                img_res , row_counter , detected_person_cordinate = self.LOCATION.cam2_run(img_res, nmx_boxes , filtering_boxes)
                 
             
             return img_res , row_counter , detected_person_cordinate
@@ -259,38 +261,12 @@ class YoloDetector:
         
         return [], []
 
-    def draw(self, nmx_boxes: list[int], img, flag=False, filtering = []) -> np.array:
-        h, w, _ = img.shape
-        for idx, i in enumerate(nmx_boxes):
-            x1, y1, x2, y2 = i
+    def draw_boxes(self , nmx_boxes: list[int], img) -> np.array:
+        for box in nmx_boxes:
+            x1, y1, x2, y2 = box
             center_x, center_y = (x1 + x2) // 2, (y1 + y2) // 2
-            
-            if filtering:
-                # 각 박스와의 유사도 점수 계산
-                similarity_scores = []
-                for filter_box in filtering:
-                    score = self.is_similar_box([x1,y1,x2,y2], filter_box)
-                    similarity_scores.append(score)
-                
-                if similarity_scores:
-                    # 가장 유사한 박스 찾기 (가장 낮은 점수)
-                    min_score_idx = similarity_scores.index(min(similarity_scores))
-                    min_score = similarity_scores[min_score_idx]
-                    
-                    # 유사도에 따른 색상 결정
-                    if min_score < 0.3:  # 매우 유사
-                        color = (0, 255, 0)  # 초록색
-                    elif min_score < 0.6:  # 어느 정도 유사
-                        color = (0, 255, 255)  # 노란색
-                    else:  # 별로 유사하지 않음
-                        color = (255, 0, 0)  # 빨간색
-                    
-                    cv2.rectangle(img, (x1, y1), (x2, y2), color, thickness=2)
-                else:
-                    cv2.rectangle(img, (x1, y1), (x2, y2), (255, 255, 0), thickness=2)
-            else:
-                cv2.rectangle(img, (x1, y1), (x2, y2), (255, 255, 0), thickness=2)
-            
+
+            cv2.rectangle(img, (x1, y1), (x2, y2), (255, 255, 0), thickness=2)
             cv2.circle(img, (center_x, center_y), 5, (0, 0, 255), -1)  
             cv2.putText(img, f'({center_x}, {center_y})', 
                         (center_x, center_y), 
@@ -298,17 +274,37 @@ class YoloDetector:
                         0.3, 
                         (255, 255, 255), 
                         1)
-                    
-            # 유사도 점수 표시 (선택사항)
-            if filtering and similarity_scores:
-                cv2.putText(img, f'Score: {min_score:.2f}', 
-                            (x1, y1-10), 
-                            cv2.FONT_HERSHEY_DUPLEX, 
-                            0.5, 
-                            color, 
-                            1)
         return img
     
+    def filter_and_draw_boxes(self, nmx_boxes: list[int], img, filtering) -> tuple:
+        filtering_boxes = []
+        for idx, box in enumerate(nmx_boxes):
+            x1, y1, x2, y2 = box
+            center_x, center_y = (x1 + x2) // 2, (y1 + y2) // 2
+            
+            if filtering:
+                similarity_scores = []
+                for filter_box in filtering:
+                    score = self.is_similar_box([x1, y1, x2, y2], filter_box)
+                    similarity_scores.append(score)
+                
+                if similarity_scores:
+                    min_score_idx = similarity_scores.index(min(similarity_scores))
+                    min_score = similarity_scores[min_score_idx]
+                    
+                    color = (0, 255, 0) if min_score < 0.3 else (0, 255, 255) if min_score < 0.6 else (255, 0, 0)
+                    cv2.rectangle(img, (x1, y1), (x2, y2), color, thickness=2 if min_score < 0.6 else 3)
+                    if min_score < 0.6:
+                        filtering_boxes.append([x1, y1, x2, y2])
+                else:
+                    cv2.rectangle(img, (x1, y1), (x2, y2), (255, 255, 0), thickness=2)
+            else:
+                cv2.rectangle(img, (x1, y1), (x2, y2), (255, 255, 0), thickness=2)
+            
+            if filtering and similarity_scores:
+                cv2.putText(img, f'Score: {min_score:.2f}', (x1, y1-10), cv2.FONT_HERSHEY_DUPLEX, 0.5, color, 1)
+        
+        return img, filtering_boxes
     def is_similar_box(self, box1, box2):
         x1_1, y1_1, x2_1, y2_1 = box1
         x1_2, y1_2, x2_2, y2_2 = box2
@@ -388,7 +384,8 @@ class Location():
     side_seat_limit_x , side_seat_limit_y = [ 585 , 280  ] 
     side_seat_threshold_x = 415  # 좌석 9 10 노이즈제거 x1 기준 사용
 
-    def cam2_run(self, img, boxes):
+    def cam2_run(self, img, boxes , filtering_boxes = []):
+        boxes = self.remove_filtering_boxes(boxes , filtering_boxes)
         h, w, _ = img.shape
         
         # Draw vertical line at x=585 in green
@@ -478,9 +475,12 @@ class Location():
                 
         if 0 in position_details: # '0' key를 1과 병합 0열은 1량버스에서 1열과 동일하게 처리
             buffer = position_details.pop(0)
-            position_details[1]['LEFT'] = max(buffer['LEFT'], position_details[1]['LEFT'])
-            position_details[1]['RIGHT'] = max(buffer['RIGHT'], position_details[1]['RIGHT'])
-            
+            if 1 in position_details:
+                position_details[1]['LEFT'] = max(buffer['LEFT'], position_details[1]['LEFT'])
+                position_details[1]['RIGHT'] = max(buffer['RIGHT'], position_details[1]['RIGHT'])
+            else: # 1열이 없으면 key 1생성후 0열값을 1열값으로 추가
+                position_details[1] = buffer
+                
         for i in range(1,5):
             if i not in position_details:
                 position_details[i] = {'LEFT': 0, 'RIGHT': 0}
@@ -494,7 +494,7 @@ class Location():
 
         return img, position_details_sorting , []
     
-    def cam0_run(self, img, boxes):
+    def cam0_run(self, img, boxes , filtering_boxes = []):
         """
         cam0에서 감지된 사람들의 위치를 분석하고 시각화합니다.
         
@@ -522,7 +522,7 @@ class Location():
             if abs(lower_limit - x1) <= abs(upper_limit - x1):
                 return current_row
             return current_row - 1 if current_row > 1 else None
-
+        boxes = self.remove_filtering_boxes(boxes , filtering_boxes)
         h, w, _ = img.shape
         img = draw_guide_lines(img, h, w)
         
@@ -567,10 +567,17 @@ class Location():
                        0.7, (0, 0, 255))
 
         return img, dict(sorted(row_counter.items())), detected_person_coordinates
-    
+
     def get_position_info(self):
         """position_info 반환"""
         return self.position_info
+    
+    def remove_filtering_boxes(self , boxes , filtering_boxes):
+        for box in filtering_boxes:
+            boxes.remove(box)
+        return boxes
+    
+    
     
 class SeatPositionDetector:
     def __init__(self):
