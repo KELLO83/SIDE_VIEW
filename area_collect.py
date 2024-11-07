@@ -82,7 +82,7 @@ class YoloDetector:
 
 
     def prediction(self, img: np.ndarray | torch.Tensor) -> np.array:
-        result = self.model(img, classes=[0], verbose=False , device='cuda' , half=False , augment=True , iou=0.4 , conf=0.4 , imgsz=640)
+        result = self.model.predict(img, classes=[0], verbose=False , device='cuda' , half=False , augment=True , iou=0.4 , conf=0.4 , imgsz=640)
         result = result[0]
         if hasattr(result , 'plot'):
             image_plot = result.plot()
