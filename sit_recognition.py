@@ -120,7 +120,7 @@ class SitRecognition():
                 new_seat_status[key] = value
         seat_status = new_seat_status.copy()
         
-        print("DEBUG: ", seat_status)    
+        #print("DEBUG: ", seat_status)    
                 
         # 모든 좌석 좌표 리스트
         all_seats = {

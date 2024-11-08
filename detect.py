@@ -25,6 +25,10 @@ import matplotlib
 from dataclasses import dataclass
 from typing import Optional
 from pathlib import Path
+from tabulate import tabulate
+from multiprocessing import Process, Queue
+
+
 
 matplotlib.use('TkAgg')
 logging.basicConfig(
@@ -66,7 +70,7 @@ class ImageSet:
 class YoloDetector:
     def __init__(self, SCEN='1'):
         self.model = YOLO('yolo11x.pt')
-        self.LOCATION = Location()
+        self.SOA = SeatOccupancyAnalyzer()
         self.conf_threshold = 0.25
         self.iou_threshold = 0.45
         self.SCEN = SCEN
@@ -87,17 +91,17 @@ class YoloDetector:
             cam0_list = natsorted(glob(f'collect/scne{self.SCEN}_0.5origin/cam0/*.jpg'))
             cam2_list = natsorted(glob(f'collect/scne{self.SCEN}_0.5origin/cam2/*.jpg'))
             cam4_list = natsorted(glob(f'collect/scne{self.SCEN}_0.5origin/cam4/*.jpg'))
-            return self.pair(cam0_list, cam2_list, cam4_list , flag = True)
+            return self.pair(cam0_list, cam2_list, cam4_list , cam4_on = True)
         
         except Exception as e:
             logging.error(f"이미지 로딩 실패: {e}")
             return []
 
-    def pair(self, cam0_list, cam2_list, cam4_list, flag=True) -> list[ImageSet]:
+    def pair(self, cam0_list, cam2_list, cam4_list, cam4_on=True) -> list[ImageSet]:
         """이미지 경로 페어링 메서드"""
         buffer = []
         if not cam4_list:
-            flag = False
+            cam4_on = False
             
         try:
             cam0_dict = {Path(cam0_path).name : cam0_path for cam0_path in cam0_list}
@@ -113,18 +117,19 @@ class YoloDetector:
                         index = Path(name).stem
                         adjusted_name = f"{str(int(index) + 10)}.jpg"
                         cam0_path = cam0_dict.get(adjusted_name)
-                        cam4_path = cam4_dict.get(adjusted_name)
+                        cam4_path = cam4_dict.get(name)
+                        
                     else:
                         cam0_path = cam0_dict.get(name)
                         cam4_path = cam4_dict.get(name)
                         
-                    if flag and cam0_path and cam4_path:
+                    if cam4_on and cam0_path and cam4_path:
                         buffer.append(ImageSet(
                             cam0_path=cam0_path,
                             cam2_path=path,
                             cam4_path=cam4_path
                         ))
-                    elif not flag and cam0_path:
+                    elif not cam4_on and cam0_path:
                         buffer.append(ImageSet(
                             cam0_path=cam0_path,
                             cam2_path=path
@@ -139,8 +144,12 @@ class YoloDetector:
         except Exception as e:
             logging.error(f"페어링 처리 중 오류 발생: {e}")
             return []
+        
     def test_run(self , image):
-        result = self.model.predict(image, classes=0 , device='cuda:0' , augment=True )
+        # image = image [ : , 340 : , :]
+        h , w , _ = image.shape
+  
+        result = self.model.predict(image, classes=0 , device='cuda:0' , augment= False )
         result = result[0]
         if hasattr(result, 'plot'):
             return result.plot()
@@ -154,11 +163,12 @@ class YoloDetector:
                 logging.error("이미지 리스트가 비어있습니다.")
                 return
 
-            self.set_list = self.set_list[750:]
+            self.set_list = self.set_list[790:]
 
             
             for image_set in tqdm(self.set_list):
-                door , under , _  = image_set.load_image()
+                current_time = time.time()
+                door , under , cam4  = image_set.load_image()
                 
                 if door is None or under is None:
                     logging.error(f"이미지 로드 실패: {image_set.cam0_path} or {image_set.cam2_path}")
@@ -166,26 +176,38 @@ class YoloDetector:
 
                 door_plane = fisheye2plane.run(door, -40)
                 under_plane = fisheye2plane.run(under, -40)
-                under2_plane = fisheye2plane.run(under, 40 , flag = False)
-                
+                under2_plane = fisheye2plane.run(under, 40 ,move = 0, flag = False , cam_name = 'cam2_2')
+
                 
                 cam0_tracking_image , filtering_moving_obj_cam0 = self.tracking.tracking(door_plane.copy(), flag='cam0')
                 cam2_tracking_image  , filtering_moving_obj_cam2 = self.tracking.tracking(under_plane.copy() ,flag='cam2')
-                cv2.namedWindow('tracking', cv2.WINDOW_NORMAL)
-                cv2.imshow('tracking', cam2_tracking_image)
+                under2_tracking_image , filtering_moving_obj_cam2_2 = self.tracking.tracking(under2_plane.copy() ,flag='cam2_2')
+                
+                cv2.namedWindow('cam2_tracking', cv2.WINDOW_NORMAL)
+                cv2.imshow('cam2_tracking', cam2_tracking_image)
             
                 cv2.namedWindow('cam0_tracking', cv2.WINDOW_NORMAL)
                 cv2.imshow('cam0_tracking', cam0_tracking_image)
                 
-                under_prediction, seat_occupancy_count_cam2 , _ = self.prediction(under_plane.copy(), flag='cam2' , \
+                cv2.namedWindow('under2_tracking' , cv2.WINDOW_NORMAL)
+                cv2.imshow('under2_tracking' , under2_tracking_image)
+                
+                under_prediction, seat_occupancy_count_cam2 , _ = self.prediction(under_plane, flag='cam2' , \
                     filtering = filtering_moving_obj_cam2)
-                door_prediction, seat_occupancy_count_cam0 , detected_person_cordinate = self.prediction(door_plane.copy(), flag='cam0' , \
+                
+                door_prediction, seat_occupancy_count_cam0 , detected_person_cordinate = self.prediction(door_plane, flag='cam0' , \
                     filtering = filtering_moving_obj_cam0)
                 
-                # 최종 착석 cam0 cam2활용한 착석확인
+                under2_prediction , seat_occupancy_count_cam2_2 , _  = self.prediction(under2_plane, flag='cam2_2' , \
+                    filtering = filtering_moving_obj_cam2_2)
+                
+                
+                # 최종 착석 판별 모든카메라 종합 판단
                 self.seat_detector.determine_seat_positions_cam2(seat_occupancy_count_cam2)
                 self.seat_detector.camera_calibration(seat_occupancy_count_cam0, detected_person_cordinate)
-                
+                self.seat_detector.determine_seat_positions_cam2_2(seat_occupancy_count_cam2_2)
+                                
+                self.seat_detector.display_seat_status()
 
                 visualization = self.visualizer.visualize_seats(self.seat_detector.get_seat_status())
                 cv2.namedWindow("under", cv2.WINDOW_NORMAL)
@@ -195,13 +217,23 @@ class YoloDetector:
                 cv2.imshow('visualization_result', visualization)
                 
                 
+
                 cv2.namedWindow('under2', cv2.WINDOW_NORMAL)
-                cv2.imshow('under2', under2_plane)
+                cv2.imshow('under2', under2_prediction)
 
                 
-                # pose_estimation = self.pose_estimator.PoseEstimation(under_plane.copy())
+                # if cam4 is not None:
+                #     cam4_plane = fisheye2plane.run(cam4, -40 )
+                #     cam4_prediction = self.test_run(cam4_plane)
+                #     cv2.namedWindow('cam4', cv2.WINDOW_NORMAL)
+                #     cv2.imshow('cam4', cam4_prediction)
+                
+                # pose_estimation = self.pose_estimator.PoseEstimation(door_plane)
                 # cv2.namedWindow('pose_estimation', cv2.WINDOW_NORMAL)
                 # cv2.imshow('pose_estimation', pose_estimation)
+                
+                end_time = time.time()
+                logging.info(f"Time taken for 1 frame : {end_time - current_time:.4f} seconds")
                 
                 key = cv2.waitKey(0) & 0xFF
                 if key == ord('c'):
@@ -215,7 +247,7 @@ class YoloDetector:
             
     def prediction(self, img: Union[np.ndarray, torch.Tensor], flag: str, filtering: List = []) -> np.ndarray:
         try:
-            result = self.model.predict(img, classes=[0] , device='cuda:0' , iou=0.45 , conf=0.25 , augment=True)
+            result = self.model.predict(img, classes=[0] , device='cuda:0' , iou=0.45 , conf=0.25 , augment=False)
             
             boxes = []
             scores = []
@@ -231,19 +263,21 @@ class YoloDetector:
             nmx_boxes = list(map(self.nmx_box_to_cv2_loc, filtered_boxes))
             
             img_res  = self.draw_boxes(nmx_boxes, img.copy())
-            img_res , filtering_boxes = self.filter_and_draw_boxes(nmx_boxes, img_res.copy(), filtering)
+            img_res , filtering_boxes = self.filter_and_draw_boxes(nmx_boxes, img_res , filtering)
             
             if flag == 'cam0':
-                img_res , row_counter , detected_person_cordinate = self.LOCATION.cam0_run(img_res, nmx_boxes , filtering_boxes)
+                img_res , row_counter , detected_person_cordinate = self.SOA.cam0_run(img_res, nmx_boxes , filtering_boxes)
             elif flag == 'cam2':
-                img_res , row_counter , detected_person_cordinate = self.LOCATION.cam2_run(img_res, nmx_boxes , filtering_boxes)
-                
+                img_res , row_counter , detected_person_cordinate = self.SOA.cam2_run(img_res, nmx_boxes , filtering_boxes)
+            elif flag == 'cam2_2':
+                img_res , row_counter , detected_person_cordinate = self.SOA.cam2_2run(img_res, nmx_boxes , filtering_boxes)
             
             return img_res , row_counter , detected_person_cordinate
         
         except Exception as e:    
             logging.error(f"예측 중 오류 발생: {e}")
             raise e
+        
     def nmx_box_to_cv2_loc(self, boxes):
         x1, y1, w, h = boxes
         x2 = x1 + w
@@ -317,14 +351,18 @@ class YoloDetector:
                     color = (0, 255, 0) if min_score < 0.3 else (0, 255, 255) if min_score < 0.6 else (255, 0, 0)
                     cv2.rectangle(img, (x1, y1), (x2, y2), color, thickness=2 if min_score < 0.6 else 3)
                     if min_score < 0.6:
-                        filtering_boxes.append([x1, y1, x2, y2])
+                        filtering_boxes.append([x1, y1, x2, y2])                        
+                        cv2.putText(img, f'Score: {min_score:.2f}', (x1, y1-10), cv2.FONT_HERSHEY_DUPLEX, 0.5, color, 1)
+
                 else:
-                    cv2.rectangle(img, (x1, y1), (x2, y2), (255, 255, 0), thickness=2)
+                    logging.error(f"유사도 0.6이상 매칭안됨 에러케이스 : {box}")
+                    cv2.rectangle(img, (x1, y1), (x2, y2), (0, 0, 255), thickness=2) # 유사도 0.6이상 매칭안됨 에러케이스
+                    cv2.putText(img, f'Score: {min_score:.2f}', (x1, y1-10), cv2.FONT_HERSHEY_DUPLEX, 0.5, (0, 0, 255), 1)
             else:
-                cv2.rectangle(img, (x1, y1), (x2, y2), (255, 255, 0), thickness=2)
+                pass
             
-            if filtering and similarity_scores:
-                cv2.putText(img, f'Score: {min_score:.2f}', (x1, y1-10), cv2.FONT_HERSHEY_DUPLEX, 0.5, color, 1)
+           
+            
         
         return img, filtering_boxes
     def is_similar_box(self, box1, box2):
@@ -352,9 +390,8 @@ class YoloDetector:
         
         return similarity_score
     
-class Location():
-    
-    
+class SeatOccupancyAnalyzer():
+    """ 좌석 착석여부를 분석 및 처리"""    
     right_points = [
         (299, 0),    # 시작점
         (299, 30),
@@ -409,7 +446,7 @@ class Location():
 
     seat_9_10_boundary_y = 325  # y좌표 325를 기준으로 seat9과 seat10을 구분
     
-    def cam2_run(self, img, boxes , filtering_boxes = []):
+    def cam2_run(self, img, boxes , filtering_boxes = []) :
         boxes = self.remove_filtering_boxes(boxes , filtering_boxes)
         h, w, _ = img.shape
         
@@ -445,8 +482,8 @@ class Location():
             center_x = (x1 + x2) // 2
             center_y = (y1 + y2) // 2
             
-            if Location.side_seat_limit_x <= x2 and y2 >= Location.side_seat_limit_y and x1 >= Location.side_seat_threshold_x:
-                if y2 <= Location.seat_9_10_boundary_y:
+            if self.__class__.side_seat_limit_x <= x2 and y2 >= self.__class__.side_seat_limit_y and x1 >= self.__class__.side_seat_threshold_x:
+                if y2 <= self.__class__.seat_9_10_boundary_y:
                     side_seats_occupied['side_seats']['seat9'] = 1
                     cv2.circle(img, (x2, y2), 5, (0, 255, 0), -1)
                     continue
@@ -457,11 +494,11 @@ class Location():
                     continue
                 
             if  ( not center_x >= 300 and not y2 >= 570): # 570 cam2에서 마지막행 제외 
-                idx = min(range(len(Location.y_limit)), key=lambda i: abs(Location.y_limit[i] - y1))
+                idx = min(range(len(self.__class__.y_limit)), key=lambda i: abs(self.__class__.y_limit[i] - y1))
                 memory.append(idx)
                 
-                left_x = find_intersection_x(center_y, Location.left_points)
-                right_x = find_intersection_x(center_y, Location.right_points)
+                left_x = find_intersection_x(center_y, self.__class__.left_points)
+                right_x = find_intersection_x(center_y, self.__class__.right_points)
                 
                 if left_x is not None and right_x is not None:
                     dist_to_left = abs(center_x - left_x)
@@ -487,7 +524,7 @@ class Location():
 
 
         for key in row_counter.keys():
-            loc = Location.y_limit[key]
+            loc = self.__class__.y_limit[key]
             left_count = position_details.get(key, {"LEFT": 0})["LEFT"]
             right_count = position_details.get(key, {"RIGHT": 0})["RIGHT"]
             total_count = row_counter[key]
@@ -583,16 +620,64 @@ class Location():
 
         return img, dict(sorted(row_counter.items())), detected_person_coordinates
 
-    def get_position_info(self):
-        """position_info 반환"""
-        return self.position_info
-    
     def remove_filtering_boxes(self , boxes , filtering_boxes):
         for box in filtering_boxes:
             boxes.remove(box)
         return boxes
     
-    
+    def cam2_2run(self, img, boxes , filtering_boxes):
+        
+        boxes = self.remove_filtering_boxes(boxes , filtering_boxes)
+        h , w , _ = img.shape
+        limit_y = [350 , 200 , 150]
+        limit_x = [310 , 200] # 우측 좌측 side
+        seat_occupancy = {'row1': {'left' : 0 , 'right' : 0 , 'side' : 0},
+                          'row2' : 0 ,
+                          'row3' : 0 ,}
+        
+        for y in limit_y:
+            cv2.line(img , (0 , y) , (w - 1 , y) , (0, 255, 0) , 2) # 열을 구분하는선
+        for x in limit_x:
+            cv2.line(img , (x , 0) , (x , h - 1) , (0, 255, 255) , 2) # 노이즈를 제거하는선
+        
+        for i in boxes:
+            x1 , y1 , x2 , y2 = list(map(int , i))
+            
+            center_x , center_y = (x1 + x2) // 2 , (y1 + y2) // 2
+            
+            closest_y = min(limit_y , key=lambda y: abs(y - y1))
+            closest_y_idx = limit_y.index(closest_y)
+            
+            if x1 > limit_x[0]:
+                if closest_y_idx == 0:
+                    left_distance = abs(center_x - limit_x[0])
+                    right_distance = abs(center_x - (w - 1))
+                    position = "LEFT" if left_distance < right_distance else "RIGHT"
+
+                    side = 'left' if position == "LEFT" else 'right'
+                    seat_occupancy['row1'][side] += 1
+                    
+                        
+                    cv2.putText(img, f"{position} ({left_distance:.1f}, {right_distance:.1f})", 
+                               (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 
+                               0.5, (0, 255, 255), 1)
+                    
+                    cv2.rectangle(img , (x1 , y1) , (x2 , y2) , (0 , 165 , 255) , 2)
+                
+                elif closest_y_idx == 1:
+                    cv2.rectangle(img , (x1 , y1) , (x2 , y2) , (255 , 0 , 255) , 2)
+                    seat_occupancy['row2'] = 1
+                
+                elif closest_y_idx == 2:
+                    cv2.rectangle(img , (x1 , y1) , (x2 , y2) , (0 , 0 , 255) , 2)
+                    seat_occupancy['row3'] = 1
+            
+            elif x2 < limit_x[1] and center_y > limit_y[0]:
+                cv2.rectangle(img , (x1 , y1) , (x2 , y2) , (0, 165, 255) , 2)
+                seat_occupancy['row1']['side'] = 1
+        
+        return img , seat_occupancy , []
+        
     
 class SeatPositionDetector:
     cam0_right_left_boundary = 270
@@ -602,18 +687,43 @@ class SeatPositionDetector:
         return cls.cam0_right_left_boundary
     
     def __init__(self):
-        self.seat_positions = {}
-    def _initialize_seats_cam2(self):
+        self.seat_positions = self._initialize_seats()
+        
+    def _initialize_seats(self):
         # 모든 좌석을 False로 초기화
         return {
             f'row{i}': {'left': False, 'right': False}
-            for i in range(1, 5)
-        } | {'side_seat': {'seat9': False, 'seat10': False}}
+            for i in range(1, 5) 
+        } | {'side_seat': {'seat9': False, 'seat10': False}}  | {
+            'row5': {'left' : False , 'right' : False , 'side' : False},
+            'row6': False,
+            'row7': False
+        }
+
+
+    def determine_seat_positions_cam2_2(self, cam2_2_detections):
+        """
+        Args:
+            cam2_2_detections : {'row1': {'left': 1, 'right': 1, 'side': 1}, 'row2': 1, 'row3': 1}
+        """
+
+        try:
+            for key, value in cam2_2_detections.items():
+                adjust_key_name = f'row{int(key[3 : ]) + 4}'
+                
+                if adjust_key_name == 'row5':
+                    for position in ['left', 'right', 'side']:
+                        self.seat_positions['row5'][position] = bool(value.get(position, 0))
+                    
+                elif adjust_key_name in ['row6', 'row7']:
+                    self.seat_positions[adjust_key_name] = bool(value)
+                
+        except Exception as e:
+            logging.error(f"좌석 매핑 오류: {e}")
+                
 
     def determine_seat_positions_cam2(self, cam2_detections):
         try:    
-            
-            self.seat_positions = self._initialize_seats_cam2()
             
             for key, value in cam2_detections.items():
                 if key == 'side_seat':
@@ -734,6 +844,63 @@ class SeatPositionDetector:
     
     def get_seat_status(self):
         return self.seat_positions
+
+    def display_seat_status(self):
+        """좌석 상태를 표 형태로 출력"""
+        
+        # 일반 좌석 데이터 구성 (Row 1-4, 5-7)
+        regular_seats = []
+        side_seats = self.seat_positions['side_seat']
+        
+        # Row 1-2 데이터
+        for i in range(1, 3):
+            row = self.seat_positions[f'row{i}']
+            regular_seats.append([
+                f'Row {i}',
+                '🟢' if row['left'] else '⚫',
+                '🟢' if row['right'] else '⚫',
+                '-'  # extra 칸
+            ])
+        
+        # Row 3-4 데이터 (side_seat 포함)
+        row3 = self.seat_positions['row3']
+        regular_seats.append([
+            'Row 3',
+            '🟢' if row3['left'] else '⚫',
+            '🟢' if row3['right'] else '⚫',
+            '🟢' if side_seats['seat9'] else '⚫'  # seat9를 Row 3 extra에 표시
+        ])
+        
+        row4 = self.seat_positions['row4']
+        regular_seats.append([
+            'Row 4',
+            '🟢' if row4['left'] else '⚫',
+            '🟢' if row4['right'] else '⚫',
+            '🟢' if side_seats['seat10'] else '⚫'  # seat10을 Row 4 extra에 표시
+        ])
+        
+        # Row 5 데이터
+        row5 = self.seat_positions['row5']
+        regular_seats.append([
+            'Row 5',
+            '🟢' if row5['left'] else '⚫',
+            '🟢' if row5['right'] else '⚫',
+            '🟢' if row5['side'] else '⚫'
+        ])
+        
+        # Row 6-7 데이터
+        for i in range(6, 8):
+            regular_seats.append([
+                f'Row {i}',
+                '-',
+                '🟢' if self.seat_positions[f'row{i}'] else '⚫',
+                '-'
+            ])
+
+        print("\n=== 버스 좌석 상태 ===")
+        print(tabulate(regular_seats, 
+                      headers=['Row', 'Left', 'Right', 'Extra'],
+                      tablefmt='pretty'))
 
 class YoloPoseEstimator:
     def __init__(self):
@@ -1080,7 +1247,7 @@ class YoloPoseEstimator:
                 xyxys = result.boxes.xyxy.data
                 for index, (person_keypoints, xyxy) in enumerate(zip(keypoints, xyxys)):
                     x1, y1, x2, y2 = list(map(int, xyxy.cpu().numpy()))
-                    center_x, center_y = int((x1+x2)//2), int((y1+y2)//2)
+                    center_x, center_y = int((x1+x2)//2), int((y1+y2)//2)   
                     cv2.rectangle(output_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     cv2.putText(output_img, f'{index}', (x1, y1), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
                     # 각도 계산
@@ -1152,8 +1319,6 @@ class YoloTracking:
     def __init__(self):
         self.tracking_model = YOLO('yolo11x.pt')
         self.test_model = YOLO('yolo11x.pt')
-        
-        self.location = Location()
         self.visualize = SitRecognition()
    
         self.in_points =[
@@ -1188,14 +1353,17 @@ class YoloTracking:
         ]
         
 
-
+        self.under2_out_points = [(210,0),(227, 254), (225, 269), (220, 290), (214, 318), (208, 347), (204, 382), (197, 409), (192, 442), (181, 488), (176, 513), (163, 573), (154, 614), (150, 639)]
+        self.under2_inpoints = 340
+        
+        
         # idx 1부터 끝까지 x좌표에 30 더하기 -> 기존은 복도라인에 맞췄는데 조정작업 진행함 조금더 의자쪽으로 조정진행
         for i in range(1, len(self.out_points)):
             x, y = self.out_points[i]
             self.out_points[i] = (x + 30, y)
 
-        self.cam0_out_points = [(636, 367), (559, 367), (542, 368), (527, 368), (512, 377), (493, 380), (468, 385), (451, 384), (435, 378), (420, 373), (401, 373), (376, 373), (358, 379), (338, 383), (319, 385), (305, 385), (289, 382), (275, 373), (260, 372), (241, 373), (228, 377), (210, 377), (187, 383), (164, 385), (142, 384), (129, 378), (119, 370), (109, 374), (100, 374), (75, 372), (51, 378), (25, 383), (4, 375)]
-        self.cam0_out_points = [(639,520), (0,425)]
+        #self.cam0_out_points = [(636, 367), (559, 367), (542, 368), (527, 368), (512, 377), (493, 380), (468, 385), (451, 384), (435, 378), (420, 373), (401, 373), (376, 373), (358, 379), (338, 383), (319, 385), (305, 385), (289, 382), (275, 373), (260, 372), (241, 373), (228, 377), (210, 377), (187, 383), (164, 385), (142, 384), (129, 378), (119, 370), (109, 374), (100, 374), (75, 372), (51, 378), (25, 383), (4, 375)]
+        self.cam0_out_points = [(639,415), (0,415)]
         
     def __create_track_line(self, img, flag): 
         """
@@ -1214,15 +1382,20 @@ class YoloTracking:
             'cam0': {
                 'points': [(w-1, h-1)] + self.cam0_out_points + [(0, h-1)],
                 'reverse_points': False,
-                'additional_mask': True  # cam0에 대한 추가 마스크 플래그
+                'additional_mask': True  
             },
             'cam2': {
                 'points': [(639, 0)] + self.in_points + self.out_points,
                 'reverse_points': True,
                 'additional_mask': False
+            },
+            'cam2_2': {
+                'points': self.under2_out_points + [(340, h-1), (340, 0)],  # x=340 세로선 추가
+                'reverse_points': False,
+                'additional_mask' : False
             }
         }
-        
+
         config = track_config[flag]
         points_list = config['points']
         
@@ -1238,7 +1411,7 @@ class YoloTracking:
         
 
         if flag == 'cam0' and config['additional_mask']:
-            upper_limit = 200 # cam0 바깥창문사람 제거
+            upper_limit = 135 # cam0 바깥창문사람 제거
             upper_points = np.array([
                 [0, 0],     
                 [w-1, 0],  
@@ -1248,8 +1421,10 @@ class YoloTracking:
             
             # 추가 마스크 적용
             cv2.fillPoly(mask, [upper_points], (0,0,255))
-            
         
+        if flag == 'cam2_2':
+            mask[ : 120 , :  ,  :] = 0
+            
         return mask
     
     def tracking(self, img, flag):
@@ -1277,6 +1452,7 @@ class YoloTracking:
         
         track_config = {
             'cam0': {
+                'camera' : 'cam0',
                 'track_line_attr': 'track_line_cam0',
                 'create_track_line': self.__create_track_line,
                 'movement_status_attr': 'movement_status_cam0',
@@ -1288,6 +1464,7 @@ class YoloTracking:
                 'model' : 'cam0_model'
             },
             'cam2': {
+                'camera' : 'cam2',
                 'track_line_attr': 'track_line_cam2',
                 'create_track_line': self.__create_track_line,
                 'movement_status_attr': 'movement_status_cam2',
@@ -1297,10 +1474,25 @@ class YoloTracking:
                 'disappeared_counts_attr': 'disappeared_counts_cam2',
                 'obj_colors_attr': 'obj_colors_cam2',
                 'model' : 'cam2_model'
+            },
+            'cam2_2': { 
+                'camera' : 'cam2_2',
+                'track_line_attr': 'track_line_cam2_2',
+                'create_track_line': self.__create_track_line,
+                'movement_status_attr': 'movement_status_cam2_2',
+                'dynamic_status_attr': 'dynamic_status_cam2_2',
+                'center_points_attr': 'center_points_cam2_2',
+                'prev_frame_ids_attr': 'prev_frame_ids_cam2_2',
+                'disappeared_counts_attr': 'disappeared_counts_cam2_2',
+                'obj_colors_attr': 'obj_colors_cam2_2',
+                'model' : 'cam2_2_model'
             }
         }
         logging.debug(f"track_config: {track_config}")
-        config = track_config[flag]
+        config = track_config.get(flag , None)
+        
+        if config is None:
+            return img , []
         
         if not hasattr(self , config['model']):
             setattr(self , config['model'] , YOLO('yolo11x.pt'))
@@ -1315,8 +1507,7 @@ class YoloTracking:
         
         if not hasattr(self, config['prev_frame_ids_attr']):
             setattr(self, config['prev_frame_ids_attr'], set())
-
-
+            
         results = getattr(self , config['model']).track(
             img.copy(),
             persist=True,
@@ -1335,7 +1526,7 @@ class YoloTracking:
             image_plot = results.plot()
             track_line = getattr(self, config['track_line_attr'])
             image_plot = cv2.addWeighted(image_plot, 0.8, track_line, 0.2, 0)
-        
+                
         movement_status = getattr(self, config['movement_status_attr']) # 각 객체(id) 보류 / 동적 / 정적 상태 저장
         current_frame_ids = set()
         filtering_moving_obj = []
@@ -1395,6 +1586,7 @@ class YoloTracking:
             if len(dynamic_status[obj_id]) >= 5: 
                 coordinates = list(dynamic_status[obj_id])[-5:]
                 points_in_mask = 0
+            
                 
                 for coord in coordinates:
                     try:
@@ -1404,12 +1596,32 @@ class YoloTracking:
        
                         x = max(0, min(x, w-1))  
                         y = max(0, min(y, h-1))  
-                        
-                        if track_line[y, x].any():
-                            points_in_mask += 1
-                        
+
+                        # if track_line[y , x].any():
+                        #     points_in_mask += 1   
+                                             
+                        if not track_config[flag]['camera'] in ['cam0', 'cam2_2']:
+                            if track_line[y, x].any():
+                                points_in_mask += 1
+                                
+                        else:
+                            box_area = (x2 - x1) * (y2 - y1)
+                            box_mask = track_line[y1:y2, x1:x2]
+                            overlap_pixel = np.sum(box_mask > 0)
+                            overlap_ratio = overlap_pixel / box_area
+                            
+                            cv2.putText(image_plot, f"{overlap_ratio:.2f}", (x1, y1 + 20),
+                            cv2.FONT_HERSHEY_DUPLEX, 1, (0, 255, 0), 2)
+                            
+                            if overlap_ratio > 0.1 and track_config[flag]['camera'] == 'cam0':
+                                points_in_mask += 1
+                                
+                            elif overlap_ratio > 0.15 and track_config[flag]['camera'] == 'cam2_2':
+                                points_in_mask += 1
+                                
+                            
                     except Exception as e:
-                        logging.warning(f"좌표 처리 중 오류 발생: {e}")
+                        logging.warning(f"좌표 처리 중 오류 발���: {e}")
                         continue
                 
                 if points_in_mask >= 3:
@@ -1421,8 +1633,8 @@ class YoloTracking:
                     cv2.putText(image_plot, "STATIC", (x_center, y_center),
                              cv2.FONT_HERSHEY_DUPLEX, 1, (0, 255, 0), 2)
                 
-                cv2.putText(image_plot, f"{points_in_mask}", (x1, y1 + 20),
-                         cv2.FONT_HERSHEY_DUPLEX, 1, (0, 255, 255), 2)
+                cv2.putText(image_plot, f"{points_in_mask}", (x1, y1 + 50),
+                         cv2.FONT_HERSHEY_DUPLEX, 1, (0, 255, 255), 1)
             else:
                 movement_status[obj_id] = ("PENDING", 0)
                 cv2.putText(image_plot, "PENDING", (x_center, y_center),
@@ -1459,22 +1671,22 @@ class YoloTracking:
 
         setattr(self, config['prev_frame_ids_attr'], current_frame_ids)
         
-        # STATIC 객체 처리 및 시각화
-        if flag == 'cam2':  # cam2에서만 수행
-            filter_status = [id for id, (status, _) in movement_status.items() if status == "STATIC"]
-            filter_boxes = []
-            for obj in results.boxes:
-                if obj.id in filter_status:
-                    x1, y1, x2, y2 = list(map(int, obj.xyxy[0].cpu().numpy()))
-                    cv2.rectangle(image_plot, (x1, y1), (x2, y2), (0,165,255), 3)
-                    filter_boxes.append([x1, y1, x2, y2])
+       
+        # if flag == 'cam2':  # cam2에서만 수행
+        #     filter_status = [id for id, (status, _) in movement_status.items() if status == "STATIC"]
+        #     filter_boxes = []
+        #     for obj in results.boxes:
+        #         if obj.id in filter_status:
+        #             x1, y1, x2, y2 = list(map(int, obj.xyxy[0].cpu().numpy()))
+        #             cv2.rectangle(image_plot, (x1, y1), (x2, y2), (0,165,255), 3)
+        #             filter_boxes.append([x1, y1, x2, y2])
             
-            img, position_list, _ = self.location.cam2_run(img.copy(), filter_boxes)
-            visualize_img = self.visualize.visualize_seats(position_list)
+        #     img, position_list, _ = self.location.cam2_run(img.copy(), filter_boxes)
+        #     visualize_img = self.visualize.visualize_seats(position_list)
             
             
-            cv2.namedWindow("visualize", cv2.WINDOW_NORMAL)
-            cv2.imshow("visualize", visualize_img)
+        #     cv2.namedWindow("visualize", cv2.WINDOW_NORMAL)
+        #     cv2.imshow("visualize", visualize_img)
         
         return image_plot , filtering_moving_obj
     

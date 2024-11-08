@@ -64,7 +64,7 @@ def fisheye_to_plane_info(frame, ih, iw, i_fov=180, o_fov=90, o_sz=600, o_u=0, o
     out = np.fliplr(transformed_image)
 
     return out
-def run(frame, view, move=0, flag=True):
+def run(frame, view, move=0, flag=True , cam_name = None):
     """_summary_
 
     Args:
@@ -73,6 +73,7 @@ def run(frame, view, move=0, flag=True):
         fag (_type_) : True -> ROTATE_90_COUNTERCLOCKWISE
     """
     #frame = cv2.imread(frame , cv2.IMREAD_COLOR)
+
 
     h, w, _ = list(map(int, frame.shape))
 
@@ -88,6 +89,11 @@ def run(frame, view, move=0, flag=True):
         res = cv2.rotate(res , cv2.ROTATE_90_COUNTERCLOCKWISE)
     else:
         res = cv2.rotate(res , cv2.ROTATE_90_CLOCKWISE)
+    
+    if cam_name == 'cam2_2':
+
+        res [ : 120 , : , :] = 0    
+        
     return res
 
 def adjust(f_list , u_list):
