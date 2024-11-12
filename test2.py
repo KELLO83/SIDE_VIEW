@@ -27,9 +27,11 @@ from dataclasses import dataclass
 from typing import Optional
 from pathlib import Path
 from tabulate import tabulate
+from multiprocessing import Process, Queue
 from torch.cuda import Stream
 import torch.cuda
 import torch
+from concurrent.futures import ThreadPoolExecutor
 
 mp.set_start_method('spawn', force=True)
 
@@ -79,13 +81,6 @@ class YoloDetector:
         torch.cuda.empty_cache()
         
         self.model = YOLO('yolo11x.pt').to('cuda')
-        self.model.model = torch.compile( 
-            self.model.model,
-            mode='max-autotune',  # 'default', 'reduce-overhead : 컴파일시간 감소우선', 'max-autotune : 성능최대화 '
-            fullgraph= True, # 단일그래프 채택 입력크기 고정
-            dynamic = False, # 입력크기고정 640
-            backend='inductor', # pytorch 2.0 (권장) 
-        )
         
         self.SOA = SeatOccupancyAnalyzer()
         self.conf_threshold = 0.25
@@ -160,6 +155,7 @@ class YoloDetector:
             return []
         
     def test_run(self, image):
+        import torch.autograd.profiler as profiler
 
         h, w, _ = image.shape
         
@@ -218,7 +214,7 @@ class YoloDetector:
  
                 with torch.cuda.stream(streams['cam2']):
                     under_plane = fisheye2plane_GPU.run(under, -40)
-                    tracking_result, filtering = self.tracking.test(under_plane, flag='cam2')
+                    tracking_result, filtering = self.tracking.tracking(under_plane, flag='cam2')
                     pred_result = self.prediction(under_plane, flag='cam2', filtering=filtering)
                     results['cam2'] = {'tracking': tracking_result, 'prediction': pred_result}
 
@@ -273,7 +269,7 @@ class YoloDetector:
             self.seat_detector.determine_seat_positions_cam2_2(seat_occupancy_count_cam2_2)
             #self.seat_detector.display_seat_status()
 
-        visualization = self.visualizer.visualize_seats(self.seat_detector.get_seat_status())
+        #visualization = self.visualizer.visualize_seats(self.seat_detector.get_seat_status())
         
                 
         end_time = time.time()
@@ -325,7 +321,7 @@ class YoloDetector:
             return img_res , row_counter , detected_person_cordinate
         
         except Exception as e:    
-            logging.error(f"예측 중 류 발생: {e}")
+            logging.error(f"예측 중 오류 발생: {e}")
             raise e
         
     def nmx_box_to_cv2_loc(self, boxes):
@@ -630,7 +626,6 @@ class SeatOccupancyAnalyzer():
         boxes = self.remove_filtering_boxes(boxes , filtering_boxes)
         h, w, _ = img.shape
         img = draw_guide_lines(img, h, w)
-        
         
         
         detected_person_coordinates = {f'row{i}': [] for i in range(1, 5)}
@@ -1158,7 +1153,7 @@ class YoloPoseEstimator:
             all(int(coord) > 0 for coord in left_eye[:2]) and
             all(int(coord) > 0 for coord in right_eye[:2])):
             
-            # 쪽 눈의 중점 계산
+            # 양쪽 눈의 중점 계산
             eyes_center = np.array([
                 (left_eye[0] + right_eye[0]) / 2,
                 (left_eye[1] + right_eye[1]) / 2
@@ -1298,8 +1293,7 @@ class YoloPoseEstimator:
                 xyxys = result.boxes.xyxy.data
                 for index, (person_keypoints, xyxy) in enumerate(zip(keypoints, xyxys)):
                     x1, y1, x2, y2 = list(map(int, xyxy.cpu().numpy()))
-                    center_x = int((x1+x2)//2)
-                    center_y = int((y1+y2)//2)
+                    center_x, center_y = int((x1+x2)//2), int((y1+y2)//2)   
                     cv2.rectangle(output_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
                     cv2.putText(output_img, f'{index}', (x1, y1), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
                     # 각도 계산
@@ -1479,7 +1473,6 @@ class YoloTracking:
             
         return mask
     
-
     def tracking(self, img, flag):
         """
         Args:
@@ -1744,174 +1737,28 @@ class YoloTracking:
         
         return image_plot , filtering_moving_obj
     
-    def test(self, img, flag ):
-        from deep_sort_realtime.deepsort_tracker import DeepSort
-        img_original = img.copy()
-
-        track_config = {
-            'cam2': {
-                'camera': 'cam2',
-                'track_line_attr': 'track_line_cam2',
-                'create_track_line': self.__create_track_line,
-                'movement_status_attr': 'movement_status_cam2',
-                'dynamic_status_attr': 'dynamic_status_cam2',
-                'center_points_attr': 'center_points_cam2',
-                'prev_frame_ids_attr': 'prev_frame_ids_cam2',
-                'disappeared_counts_attr': 'disappeared_counts_cam2',
-                'obj_colors_attr': 'obj_colors_cam2',
-            }
-        }
+    def test(self, img ):
+        print("===============================test================================")
+        results = self.tracking_model.track(
+            img.copy(),
+            persist=False,
+            classes=[0],
+            half=False,
+            device='cuda:0',
+            iou=0.45,
+            conf=0.25,
+            imgsz=640,
+            augment=False,
+            visualize = False,
+        )
+        result = results[0]
+        if hasattr(result, 'plot'):
+            image_plot = result.plot()
+        else:
+            image_plot = img
         
-        config = track_config.get(flag, None)
-        if config is None:
-            return img, []
-            
-        # 필요한 속성들 초기화
-        if not hasattr(self, config['track_line_attr']):
-            setattr(self, config['track_line_attr'], self.__create_track_line(img.copy(), flag))
-        
-        for attr in ['movement_status_attr', 'dynamic_status_attr', 'center_points_attr', 
-                    'obj_colors_attr', 'disappeared_counts_attr']:
-            if not hasattr(self, config[attr]):
-                setattr(self, config[attr], {})
-                
-        if not hasattr(self, config['prev_frame_ids_attr']):
-            setattr(self, config['prev_frame_ids_attr'], set())
+        return image_plot
 
-        if not hasattr(self, 'tracker'):
-            setattr(self, 'tracker', DeepSort(
-                max_age=15,
-                n_init=5,
-                nms_max_overlap=0.7,
-                max_cosine_distance=0.3,
-                nn_budget=100,
-                embedder_gpu=True,
-                half=False,
-            ))
-
-        results = self.test_model(img, device='cuda:0', iou=0.45, conf=0.25, imgsz=640, classes=[0])
-        
-        detections = []
-        yolo_boxes = []
-        current_frame_ids = set()
-        movement_status = getattr(self, config['movement_status_attr'])
-        filtering_moving_obj = []
-
-        for result in results[0].boxes:
-            x1, y1, x2, y2 = map(int, result.xyxy[0].cpu().numpy())
-            confidence = float(result.conf[0].cpu().numpy())
-            
-            yolo_boxes.append([x1, y1, x2, y2])
-            detection = [[x1, y1, x2-x1, y2-y1], confidence, 0]
-            detections.append(detection)
-
-        if len(detections) > 0:
-            tracks = self.tracker.update_tracks(detections, frame=img)
-            track_line = getattr(self, config['track_line_attr'])
-            
-            for track in tracks:
-                if not track.is_confirmed():
-                    continue
-                
-                track_id = track.track_id
-                current_frame_ids.add(track_id)
-                ltrb = track.to_ltrb()
-                x1, y1, x2, y2 = map(int, ltrb)
-                x_center, y_center = (x1 + x2) // 2, (y1 + y2) // 2
-                
-                # 객체 색상 할당
-                obj_colors = getattr(self, config['obj_colors_attr'])
-                if track_id not in obj_colors:
-                    obj_colors[track_id] = (
-                        random.randint(0,255),
-                        random.randint(0,255),
-                        random.randint(0,255)
-                    )
-                color = obj_colors[track_id]
-                
-                # 발바닥 위치 저장
-                center_points = getattr(self, config['center_points_attr'])
-                if track_id not in center_points:
-                    center_points[track_id] = deque(maxlen=20)
-                center_points[track_id].append((x_center, y2))
-                
-                # 동적 상태 추적
-                dynamic_status = getattr(self, config['dynamic_status_attr'])
-                if track_id not in dynamic_status:
-                    dynamic_status[track_id] = deque(maxlen=5)
-                dynamic_status[track_id].append((x_center, y2))
-                
-                # 상태 분석
-                if len(dynamic_status[track_id]) >= 5:
-                    coordinates = list(dynamic_status[track_id])[-5:]
-                    points_in_mask = 0
-                    
-                    for coord in coordinates:
-                        try:
-                            x, y = map(int, coord)
-                            h, w = track_line.shape[:2]
-                            x = max(0, min(x, w-1))
-                            y = max(0, min(y, h-1))
-                            
-                            if track_line[y, x].any():
-                                points_in_mask += 1
-                                
-                        except Exception as e:
-                            logging.warning(f"좌표 처리 중 오류 발생: {e}")
-                            continue
-                    
-                    if points_in_mask >= 3:
-                        movement_status[track_id] = ("MOVING", points_in_mask)
-                        cv2.putText(img_original, "MOVING", (x_center, y_center),
-                                 cv2.FONT_HERSHEY_DUPLEX, 1, (0, 0, 255), 2)
-                        filtering_moving_obj.append([x1, y1, x2, y2])
-                    else:
-                        movement_status[track_id] = ("STATIC", points_in_mask)
-                        cv2.putText(img_original, "STATIC", (x_center, y_center),
-                                 cv2.FONT_HERSHEY_DUPLEX, 1, (0, 255, 0), 2)
-                else:
-                    movement_status[track_id] = ("PENDING", 0)
-                    cv2.putText(img_original, "PENDING", (x_center, y_center),
-                             cv2.FONT_HERSHEY_DUPLEX, 1, (0, 255, 255), 2)
-                
-                # 바운딩 박스와 정보 표시
-                cv2.rectangle(img_original, (x1, y1), (x2, y2), color, 2)
-                cv2.circle(img_original, (x_center, y2), 5, color, -1)
-                info_text = f"ID:{track_id} ({track.time_since_update}f)"
-                cv2.putText(img_original, info_text, (x1, y1-10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-                
-            # 사라진 객체 처리
-            prev_frame_ids = getattr(self, config['prev_frame_ids_attr'])
-            disappeared_ids = prev_frame_ids - current_frame_ids
-            disappeared_counts = getattr(self, config['disappeared_counts_attr'])
-            
-            for disappeared_id in disappeared_ids:
-                if disappeared_id not in disappeared_counts:
-                    disappeared_counts[disappeared_id] = 1
-                else:
-                    disappeared_counts[disappeared_id] += 1
-                    
-                if disappeared_counts[disappeared_id] >= 5:
-                    dynamic_status = getattr(self, config['dynamic_status_attr'])
-                    if disappeared_id in dynamic_status:
-                        del dynamic_status[disappeared_id]
-                    del disappeared_counts[disappeared_id]
-                
-            for current_id in current_frame_ids:
-                if current_id in disappeared_counts:
-                    del disappeared_counts[current_id]
-                else:
-                    if current_id not in disappeared_counts:
-                        disappeared_counts[current_id] = 1
-            
-            setattr(self, config['prev_frame_ids_attr'], current_frame_ids)
-            
-            # Mask overlay
-            img_original = cv2.addWeighted(img_original, 0.8, track_line, 0.2, 0)
-
-        return img_original, filtering_moving_obj
-    
 class YoloSegmentation:
     colors = [
             (51, 255, 255),  # 노란색 (Yellow)
@@ -2010,7 +1857,6 @@ if __name__ == "__main__":
         C.main()
     except Exception as e:
         logging.error(f"메인 실행 중 오류 발생: {e}")
-        
         
         
         

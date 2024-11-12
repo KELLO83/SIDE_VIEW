@@ -2,7 +2,6 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 import cv2
-import logging
 
 def get_rotation_matrix_tensor(rad, ax):
     ax = torch.tensor(ax, device='cuda')
@@ -112,7 +111,7 @@ if __name__ == "__main__":
     import logging
     current_time = time.time()
     frame = cv2.imread('collect/scne2_0.5origin/cam2/129.jpg')
-    result = run_tensor(frame, -40, 0, True, 'cam2')
+    result = run(frame, -40, 0, True, 'cam2')
     print(f"처리 시간: {time.time() - current_time:.4f} seconds")
     cv2.imshow('result', result)
     cv2.waitKey(0)

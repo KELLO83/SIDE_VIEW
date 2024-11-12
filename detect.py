@@ -207,7 +207,7 @@ class YoloDetector:
                 self.seat_detector.camera_calibration(seat_occupancy_count_cam0, detected_person_cordinate)
                 self.seat_detector.determine_seat_positions_cam2_2(seat_occupancy_count_cam2_2)
                                 
-                self.seat_detector.display_seat_status()
+                #self.seat_detector.display_seat_status()
 
                 visualization = self.visualizer.visualize_seats(self.seat_detector.get_seat_status())
                 cv2.namedWindow("under", cv2.WINDOW_NORMAL)
@@ -233,7 +233,7 @@ class YoloDetector:
                 # cv2.imshow('pose_estimation', pose_estimation)
                 
                 end_time = time.time()
-                logging.info(f"Time taken for 1 frame : {end_time - current_time:.4f} seconds")
+                logging.info(f"소요시간 : {end_time - current_time:.4f} seconds")
                 
                 key = cv2.waitKey(0) & 0xFF
                 if key == ord('c'):

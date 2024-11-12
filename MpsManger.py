@@ -20,7 +20,6 @@ class MPSManager:
             if result.returncode != 0:
                 raise RuntimeError(f"Exclusive 모드 활성화 실패: {result.stderr}")
                 
-            # MPS 데몬 시작
             cmd = f'echo "{password}" | sudo -S nvidia-cuda-mps-control -d'
             result = subprocess.run(cmd, shell=True, capture_output=True, text=True)            
             self.logger.info("MPS 활성화 성공")
@@ -31,19 +30,15 @@ class MPSManager:
             return False
         
     def disable(self) -> bool:
-        """MPS 비활성화"""
         try:
             if not self.is_enabled:
                 return True
                 
-            # MPS 데몬 종료
             os.system('echo quit | nvidia-cuda-mps-control')
-            
-            # Exclusive 모드 비활성화
+
             os.system(f'nvidia-smi -i {self.gpu_id} -c 0')
             
             self.is_enabled = False
-            self.logger.info("MPS 비활성화 성공")
             return True
             
         except Exception as e:
