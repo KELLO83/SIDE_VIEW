@@ -9,6 +9,7 @@ import pandas as pd
 import functools
 import time
 import fisheye2plane
+import fisheye2plane_GPU
 import torch
 from natsort import natsorted
 from glob import glob
@@ -29,6 +30,7 @@ from tabulate import tabulate
 from multiprocessing import Process, Queue
 from torch.cuda import Stream
 import torch.cuda
+import torch
 
 mp.set_start_method('spawn', force=True)
 
@@ -77,8 +79,8 @@ class YoloDetector:
         torch.backends.cudnn.deterministic = False # 실험의 재현성 불필요 속도 / 성능 우선순위
         torch.cuda.empty_cache()
         
-        self.model = YOLO('yolo11x.pt')
-        self.model.to('cuda')
+        self.model = YOLO('yolo11x.pt').to('cuda')
+        
         self.SOA = SeatOccupancyAnalyzer()
         self.conf_threshold = 0.25
         self.iou_threshold = 0.45
@@ -91,11 +93,6 @@ class YoloDetector:
         self.segmentation = YoloSegmentation()
         self.tracking = YoloTracking()
         
-        # self.windows = [
-        #     'cam0_tracking', 'cam2_tracking', 'under2_tracking',
-        #     'under', 'door', 'under2', 'visualization_result'
-        # ]
-
     def _load_and_pair_images(self):
         """이미지 로딩 및 페어링"""
         try:
@@ -156,85 +153,46 @@ class YoloDetector:
             logging.error(f"페어링 처리 중 오류 발생: {e}")
             return []
         
-    def test_run(self , image):
-        h , w , _ = image.shape
-  
-        result = self.model.predict(image, classes=0 , device='cuda:0' , augment= False )
-        result = result[0]
-        if hasattr(result, 'plot'):
-            return result.plot()
-        else:
-            return image
+    def test_run(self, image):
+        import torch.autograd.profiler as profiler
+
+        h, w, _ = image.shape
         
-    def process_frame(self, image_set, out_queue):
-        """프레임 처리를 위한 메서드"""
-        try:
-            # CUDA 초기화
-            torch.cuda.init()
-            
-            # 프로세스별 CUDA 스트림 생성
-            streams = {
-                'cam0': torch.cuda.Stream(),
-                'cam2': torch.cuda.Stream(),
-                'cam2_2': torch.cuda.Stream()
-            }
-            
-            results = {}
-            door, under, _ = image_set.load_image()
-            if door is None or under is None:
-                raise ValueError("이미지 로드 실패")
+        current_time = time.time()
+ 
+        result = self.model(image, classes=0, device='cuda:0', augment=False)
+        result = result[0]
 
-            with torch.cuda.stream(streams['cam0']):
-                door_plane = fisheye2plane.run(door, -40)
-            
-            with torch.cuda.stream(streams['cam2']):
-                under_plane = fisheye2plane.run(under, -40)
-                
-            with torch.cuda.stream(streams['cam2_2']):
-                under2_plane = fisheye2plane.run(under, 40, move=0, flag=False, cam_name='cam2_2')
-            
-            torch.cuda.synchronize()
-            
-            for cam_name, img in {
-                'cam0': door_plane,
-                'cam2': under_plane,
-                'cam2_2': under2_plane
-            }.items():
-                
-                with torch.cuda.stream(streams[cam_name]):
-                    # Tracking 수행
-                    tracking_image, filtering_obj = self.tracking.tracking(img.copy(), flag=cam_name)
-                    
-                    # Prediction 수행
-                    prediction_result = self.prediction(img, flag=cam_name, filtering=filtering_obj)
-                    
-                    results[cam_name] = {
-                        'tracking_image': tracking_image,
-                        'prediction_result': prediction_result,
-                        'filtering_obj': filtering_obj
-                    }
-            
-            # 모든 처리 완료 대기
-            torch.cuda.synchronize()
-            out_queue.put(results)
-            
-        except Exception as e:
-            logging.error(f"프레임 처리 오류: {e}")
-            logging.error(traceback.format_exc())
-            out_queue.put(None)
-        finally:
-            # GPU 메모리 정리
-            torch.cuda.empty_cache()
 
-    def set_run(self) -> None:
+        output_image = image.copy()
+        
+        if hasattr(result, 'boxes') and len(result.boxes):
+            boxes = result.boxes.cpu().numpy()
+            for box in boxes:
+
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                conf = float(box.conf[0])
+                
+
+                cv2.rectangle(output_image, (x1, y1), (x2, y2), color=(200,255,200) , thickness=2)
+                
+                conf_text = f'{conf:.2f}'
+                cv2.putText(output_image, conf_text, (x1, y1 - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
+                
+        end_time = time.time()
+        logging.info(f"test_run 처리 시간: {end_time - current_time:.4f} seconds")
+        
+        return output_image
+
+    def main(self) -> None:
         try:
-            self.set_list = self.set_list[790:]
+            self.set_list = self.set_list[750:]
             
             streams = {
                 'cam0': torch.cuda.Stream(),
                 'cam2': torch.cuda.Stream(),
                 'cam2_2': torch.cuda.Stream(),
-                'cam4 :' : torch.cuda.Stream(),
+                'cam4': torch.cuda.Stream(),
             }
             
             for image_set in tqdm(self.set_list):
@@ -247,35 +205,43 @@ class YoloDetector:
                 results = {}
                 
                 with torch.cuda.stream(streams['cam0']):
-                    door_plane = fisheye2plane.run(door, -40)
+                    door_plane = fisheye2plane_GPU.run(door, -40)
                     tracking_result, filtering = self.tracking.tracking(door_plane, flag='cam0')
                     pred_result = self.prediction(door_plane, flag='cam0', filtering=filtering)
                     results['cam0'] = {'tracking': tracking_result, 'prediction': pred_result}
 
                 with torch.cuda.stream(streams['cam2']):
-                    under_plane = fisheye2plane.run(under, -40)
+                    under_plane = fisheye2plane_GPU.run(under, -40)
                     tracking_result, filtering = self.tracking.tracking(under_plane, flag='cam2')
                     pred_result = self.prediction(under_plane, flag='cam2', filtering=filtering)
                     results['cam2'] = {'tracking': tracking_result, 'prediction': pred_result}
 
                 with torch.cuda.stream(streams['cam2_2']):
-                    under2_plane = fisheye2plane.run(under, 40, move=0, flag=False, cam_name='cam2_2')
+                    under2_plane = fisheye2plane_GPU.run(under, 40, move=0, flag=False, cam_name='cam2_2')
                     tracking_result, filtering = self.tracking.tracking(under2_plane, flag='cam2_2')
                     pred_result = self.prediction(under2_plane, flag='cam2_2', filtering=filtering)
                     results['cam2_2'] = {'tracking': tracking_result, 'prediction': pred_result}
-                    
-                with torch.cuda.stream(streams['cam4']):
-                    if cam4 is not None:
-                        cam4_plane = fisheye2plane.run(cam4, -40)
+                
+                if cam4 is not None:
+                    cam4_time = time.time()
+                    with torch.cuda.stream(streams['cam4']):
+                        fisheye_time = time.time()
+                        cam4_plane = fisheye2plane_GPU.run(cam4, -40)
+                        logging.info(f"fisheye 처리 시간: {time.time() - fisheye_time:.4f} seconds")
                         c4 = self.test_run(cam4_plane)
                         results['cam4'] = {'prediction': c4}
-
+                        cv2.namedWindow('cam4', cv2.WINDOW_NORMAL)
+                        cv2.imshow('cam4', c4)
+                        logging.info(f"cam4 처리 시간: {time.time() - cam4_time:.4f} seconds")
+                        
                 torch.cuda.synchronize()
 
                 self._process_results(results , current_time)
 
         except Exception as e:
             logging.error(f"실행 중 오류 발생: {str(e)}")
+            logging.error(traceback.format_exc())
+            
         finally:
             cv2.destroyAllWindows()
             torch.cuda.empty_cache()
@@ -299,9 +265,9 @@ class YoloDetector:
             self.seat_detector.determine_seat_positions_cam2(seat_occupancy_count_cam2)
             self.seat_detector.camera_calibration(seat_occupancy_count_cam0, detected_person_cordinate)
             self.seat_detector.determine_seat_positions_cam2_2(seat_occupancy_count_cam2_2)
-            self.seat_detector.display_seat_status()
+            #self.seat_detector.display_seat_status()
 
-        visualization = self.visualizer.visualize_seats(self.seat_detector.get_seat_status())
+        #visualization = self.visualizer.visualize_seats(self.seat_detector.get_seat_status())
         
                 
         end_time = time.time()
@@ -311,14 +277,11 @@ class YoloDetector:
             ("cam0", door_prediction),
             ("cam2", under_prediction),
             ("cam2_2", under2_prediction),
-            ("visualization_result", visualization)
+            # ("visualization_result", visualization)
         ]:
             if image is not None and window != 'cam0':
                 cv2.namedWindow(window, cv2.WINDOW_NORMAL)
                 cv2.imshow(window, image)
-        
-        cv2.namedWindow('cam4', cv2.WINDOW_NORMAL)
-        cv2.imshow('cam4', results['cam4']['prediction'])
                                 
         key = cv2.waitKey(0) & 0xFF
         if key == ord('c'):
@@ -1555,6 +1518,7 @@ class YoloTracking:
                 'disappeared_counts_attr': 'disappeared_counts_cam2',
                 'obj_colors_attr': 'obj_colors_cam2',
                 'model' : 'cam2_model'
+
             },
             'cam2_2': { 
                 'camera' : 'cam2_2',
@@ -1682,7 +1646,7 @@ class YoloTracking:
                         # if track_line[y , x].any():
                         #     points_in_mask += 1   
                                              
-                        if not track_config[flag]['camera'] in ['cam0', 'cam2_2']:
+                        if not track_config[flag]['camera'] in ['cam0' ,'cam2_2']:
                             if track_line[y, x].any():
                                 points_in_mask += 1
                                 
@@ -1698,9 +1662,8 @@ class YoloTracking:
                             if overlap_ratio > 0.1 and track_config[flag]['camera'] == 'cam0':
                                 points_in_mask += 1
                                 
-                            elif overlap_ratio > 0.15 and track_config[flag]['camera'] == 'cam2_2':
+                            elif overlap_ratio > 0.2 and track_config[flag]['camera'] == 'cam2_2':
                                 points_in_mask += 1
-                                
                             
                     except Exception as e:
                         logging.warning(f"좌표 처리 중 오류 발: {e}")
@@ -1889,7 +1852,7 @@ class YoloSegmentation:
 if __name__ == "__main__":
     try:
         C = YoloDetector()
-        C.set_run()
+        C.main()
     except Exception as e:
         logging.error(f"메인 실행 중 오류 발생: {e}")
         

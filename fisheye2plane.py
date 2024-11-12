@@ -72,7 +72,6 @@ def run(frame, view, move=0, flag=True , cam_name = None):
         view (_type_): "위 아래 카메라 각도"
         fag (_type_) : True -> ROTATE_90_COUNTERCLOCKWISE
     """
-    #frame = cv2.imread(frame , cv2.IMREAD_COLOR)
 
 
     h, w, _ = list(map(int, frame.shape))
