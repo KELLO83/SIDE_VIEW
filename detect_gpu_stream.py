@@ -1766,7 +1766,6 @@ class YoloTracking:
         if config is None:
             return img, []
             
-        # 필요한 속성들 초기화
         if not hasattr(self, config['track_line_attr']):
             setattr(self, config['track_line_attr'], self.__create_track_line(img.copy(), flag))
         
@@ -1780,12 +1779,13 @@ class YoloTracking:
 
         if not hasattr(self, 'tracker'):
             setattr(self, 'tracker', DeepSort(
-                max_age=15,
-                n_init=5,
+                max_age=3,
+                n_init=3,
                 nms_max_overlap=0.7,
-                max_cosine_distance=0.3,
-                nn_budget=100,
+                max_cosine_distance=0.5,
+                nn_budget=300,
                 embedder_gpu=True,
+                embedder = 'mobilenet',
                 half=False,
             ))
 
@@ -1799,6 +1799,7 @@ class YoloTracking:
 
         for result in results[0].boxes:
             x1, y1, x2, y2 = map(int, result.xyxy[0].cpu().numpy())
+            center_x , center_y = (x1 + x2) // 2 ,(y1 + y2) // 2
             confidence = float(result.conf[0].cpu().numpy())
             
             yolo_boxes.append([x1, y1, x2, y2])
@@ -1808,7 +1809,13 @@ class YoloTracking:
         if len(detections) > 0:
             tracks = self.tracker.update_tracks(detections, frame=img)
             track_line = getattr(self, config['track_line_attr'])
-            
+            if hasattr(tracks, 'mean') and tracks.mean is not None:
+                vx = tracks.mean[4]
+                vy = tracks.mean[5]
+                end_x = int(center_x + vx * 20)
+                end_y = int(center_y + vy * 20)
+                cv2.arrowedLine(img_original, (center_x, center_y), 
+                                (end_x, end_y), color, 2)
             for track in tracks:
                 if not track.is_confirmed():
                     continue
